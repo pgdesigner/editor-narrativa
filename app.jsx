@@ -1,5 +1,9 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import ReactDOM from "react-dom/client";
+import CodeMirror from "@uiw/react-codemirror";
+import { EditorView } from "@codemirror/view";
+import { history, defaultKeymap, historyKeymap } from "@codemirror/commands";
+import { keymap } from "@codemirror/view";
 import {
   Plus, Trash2, ChevronDown, ChevronRight, Users, StickyNote, Activity, Feather,
   X, Focus, Settings, Search, BookOpen, LayoutGrid, List, Network, Download,
@@ -559,6 +563,7 @@ function StoryEditor() {
   const [glossaryPopover, setGlossaryPopover] = useState(null);
   const [readMode, setReadMode] = useState(false);
   const [visualMode, setVisualMode] = useState(false);
+  const [cmMode, setCmMode] = useState(false);
   const [contextMenu, setContextMenu] = useState(null);
   const [treeContextMenu, setTreeContextMenu] = useState(null);
   const [movePicker, setMovePicker] = useState(null);
@@ -1696,6 +1701,14 @@ function StoryEditor() {
                 >
                   {renderMarkdownContent(currentScene.content, project.glossary, (g) => setGlossaryPopover(g))}
                 </div>
+              ) : cmMode ? (
+                <CodeMirrorSceneEditor
+                  content={currentScene.content}
+                  onChange={(v) => updateScene(selectedScene, { content: v })}
+                  colors={colors}
+                  fontSize={fontSize}
+                  fontFamily={fontFamilyValue}
+                />
               ) : visualMode ? (
                 <div className="w-full break-words" style={{ minHeight: "50vh" }} onClick={(e) => e.stopPropagation()}>
                   <VisualMarkdownEditor
@@ -1913,17 +1926,26 @@ function StoryEditor() {
                         </div>
                       </div>
 
-                      <button onClick={() => { setReadMode((r) => !r); if (!readMode) setVisualMode(false); showToast(!readMode ? "Modo leitura — markdown convertido em visual" : "Modo escrita"); }} className="w-full flex items-center gap-2 px-2 py-1.5 mb-2 rounded font-mono text-xs text-left" style={{ backgroundColor: colors.deskLight, color: colors.mutedLight }}>
+                      <button onClick={() => { setReadMode((r) => !r); if (!readMode) { setVisualMode(false); setCmMode(false); } showToast(!readMode ? "Modo leitura — markdown convertido em visual" : "Modo escrita"); }} className="w-full flex items-center gap-2 px-2 py-1.5 mb-2 rounded font-mono text-xs text-left" style={{ backgroundColor: colors.deskLight, color: colors.mutedLight }}>
                         {readMode ? <EyeOff size={12} /> : <Eye size={12} />} {readMode ? "voltar ao modo escrita" : "modo leitura"}
                       </button>
 
                       <button
-                        onClick={() => { setVisualMode((v) => !v); if (!visualMode) setReadMode(false); showToast(!visualMode ? "Editor visual — clique num parágrafo para ver a marcação" : "Editor de texto simples"); }}
+                        onClick={() => { setVisualMode((v) => !v); if (!visualMode) { setReadMode(false); setCmMode(false); } showToast(!visualMode ? "Editor visual — clique num parágrafo para ver a marcação" : "Editor de texto simples"); }}
                         disabled={readMode}
                         className="w-full flex items-center gap-2 px-2 py-1.5 mb-2 rounded font-mono text-xs text-left disabled:opacity-30"
                         style={{ backgroundColor: visualMode ? colors.gold : colors.deskLight, color: visualMode ? colors.ink : colors.mutedLight }}
                       >
-                        <Pilcrow size={12} /> {visualMode ? "desligar editor visual" : "editor visual (formatação ao vivo)"}
+                        <Pilcrow size={12} /> {visualMode ? "desligar editor visual" : "editor visual (clique no parágrafo)"}
+                      </button>
+
+                      <button
+                        onClick={() => { setCmMode((v) => !v); if (!cmMode) { setReadMode(false); setVisualMode(false); } showToast(!cmMode ? "Editor CodeMirror — base sem decoração ainda" : "Editor de texto simples"); }}
+                        disabled={readMode}
+                        className="w-full flex items-center gap-2 px-2 py-1.5 mb-2 rounded font-mono text-xs text-left disabled:opacity-30"
+                        style={{ backgroundColor: cmMode ? colors.gold : colors.deskLight, color: cmMode ? colors.ink : colors.mutedLight }}
+                      >
+                        <Sparkles size={12} /> {cmMode ? "desligar editor CodeMirror" : "editor CodeMirror (teste)"}
                       </button>
 
                       <div className="flex items-center gap-2 mb-2">
@@ -2592,6 +2614,39 @@ function TreeLabel({ id, value, onChange, renamingId, setRenamingId, className, 
 // clicar nele revela a marcação crua numa textarea nativa de verdade — o que
 // mantém cursor, seleção, desfazer e teclado mobile funcionando normalmente,
 // sem precisar reimplementar nada disso à mão. Clicar fora recolhe de novo.
+// Editor baseado em CodeMirror 6 — o mesmo motor de edição por trás do
+// Obsidian e do VS Code. Etapa 1: só a base funcionando (digitar, cursor,
+// desfazer, colar) sem nenhuma decoração de sintaxe ainda — isso vem depois,
+// uma vez confirmado que o alicerce está sólido no navegador de verdade.
+const cmBaseExtensions = [
+  EditorView.lineWrapping,
+  history(),
+  keymap.of([...defaultKeymap, ...historyKeymap]),
+];
+
+function CodeMirrorSceneEditor({ content, onChange, colors, fontSize, fontFamily }) {
+  const theme = EditorView.theme({
+    "&": { fontSize: `${fontSize}px`, backgroundColor: "transparent" },
+    ".cm-content": { fontFamily, color: colors.ink, padding: 0, caretColor: colors.ink },
+    ".cm-line": { padding: 0, lineHeight: 1.7 },
+    "&.cm-focused": { outline: "none" },
+    ".cm-scroller": { fontFamily, overflow: "visible" },
+    ".cm-gutters": { display: "none" },
+  });
+
+  return (
+    <div className="w-full break-words" style={{ minHeight: "50vh" }}>
+      <CodeMirror
+        value={content}
+        onChange={(value) => onChange(value)}
+        basicSetup={false}
+        extensions={[...cmBaseExtensions, theme]}
+        placeholder="Era uma vez…"
+      />
+    </div>
+  );
+}
+
 function VisualMarkdownEditor({ content, onChange, glossary, onTermClick, colors, fontSize, fontFamily }) {
   const [editingIndex, setEditingIndex] = useState(null);
   const [draft, setDraft] = useState("");
