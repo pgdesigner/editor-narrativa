@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef, useCallback, useMemo } from "react"
 import ReactDOM from "react-dom/client";
 import { EditorState, RangeSetBuilder } from "@codemirror/state";
 import { EditorView, keymap, ViewPlugin, Decoration } from "@codemirror/view";
-import { history, defaultKeymap, historyKeymap } from "@codemirror/commands";
+import { history, defaultKeymap, historyKeymap, moveLineUp, moveLineDown, copyLineUp, copyLineDown } from "@codemirror/commands";
 import {
   Plus, Trash2, ChevronDown, ChevronRight, Users, StickyNote, Activity, Feather,
   X, Focus, Settings, Search, BookOpen, LayoutGrid, List, Network, Download,
@@ -563,6 +563,7 @@ function StoryEditor() {
   const [readMode, setReadMode] = useState(false);
   const [visualMode, setVisualMode] = useState(false);
   const [cmMode, setCmMode] = useState(false);
+  const [styleHints, setStyleHints] = useState(false);
   const [contextMenu, setContextMenu] = useState(null);
   const [treeContextMenu, setTreeContextMenu] = useState(null);
   const [movePicker, setMovePicker] = useState(null);
@@ -1708,6 +1709,7 @@ function StoryEditor() {
                   fontSize={fontSize}
                   fontFamily={fontFamilyValue}
                   onContextMenuEvt={(e) => openTextContextMenu(e, (v) => updateScene(selectedScene, { content: v }), { onCreateNote: createNoteFromText })}
+                  styleHints={styleHints}
                 />
               ) : visualMode ? (
                 <div className="w-full break-words" style={{ minHeight: "50vh" }} onClick={(e) => e.stopPropagation()}>
@@ -1940,13 +1942,23 @@ function StoryEditor() {
                       </button>
 
                       <button
-                        onClick={() => { setCmMode((v) => !v); if (!cmMode) { setReadMode(false); setVisualMode(false); } showToast(!cmMode ? "Editor CodeMirror — base sem decoração ainda" : "Editor de texto simples"); }}
+                        onClick={() => { setCmMode((v) => !v); if (!cmMode) { setReadMode(false); setVisualMode(false); } showToast(!cmMode ? "Editor CodeMirror ativado" : "Editor de texto simples"); }}
                         disabled={readMode}
                         className="w-full flex items-center gap-2 px-2 py-1.5 mb-2 rounded font-mono text-xs text-left disabled:opacity-30"
                         style={{ backgroundColor: cmMode ? colors.gold : colors.deskLight, color: cmMode ? colors.ink : colors.mutedLight }}
                       >
-                        <Sparkles size={12} /> {cmMode ? "desligar editor CodeMirror" : "editor CodeMirror (teste)"}
+                        <Sparkles size={12} /> {cmMode ? "desligar editor CodeMirror" : "editor CodeMirror"}
                       </button>
+
+                      {cmMode && (
+                        <button
+                          onClick={() => { setStyleHints((v) => !v); showToast(!styleHints ? "Vícios de linguagem — advérbios em -mente e palavras repetidas" : "Vícios de linguagem desligado"); }}
+                          className="w-full flex items-center gap-2 px-2 py-1.5 mb-2 rounded font-mono text-xs text-left"
+                          style={{ backgroundColor: styleHints ? colors.gold : colors.deskLight, color: styleHints ? colors.ink : colors.mutedLight }}
+                        >
+                          <HelpCircle size={12} /> {styleHints ? "desligar vícios de linguagem" : "destacar vícios de linguagem"}
+                        </button>
+                      )}
 
                       <div className="flex items-center gap-2 mb-2">
                         <span className="font-mono text-[10px]" style={{ color: colors.muted }}>fonte</span>
@@ -2716,6 +2728,78 @@ function computeMarkerRanges(view) {
   return builder.finish();
 }
 
+// Vícios de linguagem: cada parágrafo, no nosso app, é uma linha só (mesma
+// convenção usada em todo o resto do editor) — então analisar "por linha" já
+// é analisar por parágrafo, sem precisar juntar blocos separados por linha
+// em branco.
+const STOPWORDS_PT = new Set([
+  "de", "que", "e", "do", "da", "em", "um", "uma", "os", "as", "para", "com", "não",
+  "mais", "dos", "como", "mas", "ao", "ele", "das", "se", "na", "seu", "sua", "ou",
+  "quando", "muito", "nos", "já", "eu", "também", "só", "pelo", "pela", "até", "isso",
+  "ela", "entre", "depois", "sem", "mesmo", "aos", "seus", "quem", "nas", "me", "esse",
+  "eles", "você", "essa", "num", "nem", "suas", "meu", "às", "minha", "numa", "pelos",
+  "elas", "qual", "nós", "lhe", "deles", "essas", "esses", "pelas", "este", "dele", "tu",
+  "te", "vocês", "vos", "lhes", "meus", "minhas", "teu", "tua", "teus", "tuas", "nosso",
+  "nossa", "nossos", "nossas", "dela", "delas", "esta", "estes", "estas", "aquele",
+  "aquela", "aqueles", "aquelas", "isto", "aquilo", "estou", "está", "estamos", "estão",
+  "era", "eram", "fui", "foi", "fomos", "foram", "sou", "somos", "são", "tem", "têm",
+  "tinha", "tinham", "ter", "será", "seria", "para", "pela", "pelo",
+]);
+
+function computeStyleHintDecorations(view) {
+  const builder = new RangeSetBuilder();
+  const doc = view.state.doc;
+  for (const { from, to } of view.visibleRanges) {
+    let pos = from;
+    while (pos <= to) {
+      const line = doc.lineAt(pos);
+      const text = line.text;
+      const found = [];
+
+      const wordRe = /\p{L}+/gu;
+      const counts = new Map();
+      const words = [];
+      let wm;
+      while ((wm = wordRe.exec(text)) !== null) {
+        const lower = wm[0].toLowerCase();
+        if (wm[0].length < 4 || STOPWORDS_PT.has(lower)) continue;
+        words.push({ lower, start: wm.index, end: wm.index + wm[0].length });
+        counts.set(lower, (counts.get(lower) || 0) + 1);
+      }
+      for (const w of words) {
+        if (counts.get(w.lower) >= 2) found.push({ from: w.start, to: w.end, cls: "cm-style-repeat" });
+      }
+
+      const menteRe = /\b\p{L}{4,}mente\b/giu;
+      let mm;
+      while ((mm = menteRe.exec(text)) !== null) {
+        found.push({ from: mm.index, to: mm.index + mm[0].length, cls: "cm-style-adverb" });
+      }
+
+      found.sort((a, b) => a.from - b.from || a.to - b.to);
+      for (const f of found) builder.add(line.from + f.from, line.from + f.to, Decoration.mark({ class: f.cls }));
+
+      pos = line.to + 1;
+    }
+  }
+  return builder.finish();
+}
+
+const styleHintPlugin = ViewPlugin.fromClass(
+  class {
+    constructor(view) { this.decorations = computeStyleHintDecorations(view); }
+    update(update) {
+      if (update.docChanged || update.viewportChanged) this.decorations = computeStyleHintDecorations(update.view);
+    }
+  },
+  { decorations: (v) => v.decorations }
+);
+
+const styleHintTheme = EditorView.theme({
+  ".cm-style-adverb": { textDecoration: "underline wavy #7A5C9E", textUnderlineOffset: "3px" },
+  ".cm-style-repeat": { textDecoration: "underline wavy #B23B3B", textUnderlineOffset: "3px" },
+});
+
 // Adaptador: expõe uma instância do CodeMirror com a mesma "interface" que
 // as funções de formatação já usam pra textarea (value/selectionStart/
 // selectionEnd/focus/setSelectionRange) — assim reaproveitamos o menu de
@@ -2764,6 +2848,36 @@ const markdownSyntaxTheme = EditorView.theme({
   ".cm-md-quote-line": { fontStyle: "italic", opacity: "0.9", borderLeft: "3px solid currentColor", paddingLeft: "0.6em" },
 });
 
+// Fechamento automático — adaptado do conceito de "auto-fechar tags" pra
+// nossos próprios marcadores duplos (**, ~~, ==, %%): ao completar o segundo
+// caractere, o par de fechamento já é inserido e o cursor fica no meio.
+// Digitar por cima do fechamento automático só avança o cursor, não duplica.
+const MARKDOWN_PAIR_CHARS = "*~=%";
+const markdownAutoClose = EditorView.inputHandler.of((view, from, to, insertedText) => {
+  if (from !== to || insertedText.length !== 1) return false;
+  const ch = insertedText;
+  if (!MARKDOWN_PAIR_CHARS.includes(ch)) return false;
+  const doc = view.state.doc;
+  const before = from > 0 ? doc.sliceString(from - 1, from) : "";
+  const after = doc.sliceString(from, from + 1);
+
+  // Digitando por cima do fechamento automático — só pula pra frente.
+  if (after === ch) {
+    view.dispatch({ selection: { anchor: from + 1 } });
+    return true;
+  }
+  // Completou o segundo caractere de um par (** ~~ == %%) — insere o
+  // fechamento e deixa o cursor entre os dois pares.
+  if (before === ch) {
+    view.dispatch({
+      changes: { from, to, insert: ch + ch + ch },
+      selection: { anchor: from + 1 },
+    });
+    return true;
+  }
+  return false;
+});
+
 // Editor baseado em CodeMirror 6 — o mesmo motor de edição por trás do
 // Obsidian e do VS Code. Integração própria e enxuta com o React (em vez de
 // um pacote "de conveniência" de terceiros), pra não depender de versões
@@ -2771,10 +2885,18 @@ const markdownSyntaxTheme = EditorView.theme({
 const cmBaseExtensions = [
   EditorView.lineWrapping,
   history(),
-  keymap.of([...defaultKeymap, ...historyKeymap]),
+  keymap.of([
+    { key: "Alt-ArrowUp", run: moveLineUp },
+    { key: "Alt-ArrowDown", run: moveLineDown },
+    { key: "Shift-Alt-ArrowDown", run: copyLineDown },
+    { key: "Shift-Alt-ArrowUp", run: copyLineUp },
+    ...defaultKeymap,
+    ...historyKeymap,
+  ]),
   markdownDecorationPlugin,
   markdownSyntaxTheme,
   EditorView.atomicRanges.of(computeMarkerRanges),
+  markdownAutoClose,
 ];
 
 // Diff simples (prefixo/sufixo comuns) entre o texto atual e o novo — evita
@@ -2794,7 +2916,7 @@ function applyExternalContentChange(view, newContent) {
   });
 }
 
-function CodeMirrorSceneEditor({ content, onChange, colors, fontSize, fontFamily, onContextMenuEvt }) {
+function CodeMirrorSceneEditor({ content, onChange, colors, fontSize, fontFamily, onContextMenuEvt, styleHints }) {
   const containerRef = useRef(null);
   const viewRef = useRef(null);
   const onChangeRef = useRef(onChange);
@@ -2827,6 +2949,7 @@ function CodeMirrorSceneEditor({ content, onChange, colors, fontSize, fontFamily
         ...cmBaseExtensions,
         theme,
         contextMenuHandler,
+        ...(styleHints ? [styleHintPlugin, styleHintTheme] : []),
         EditorView.updateListener.of((update) => {
           if (update.docChanged) onChangeRef.current(update.state.doc.toString());
         }),
@@ -2839,7 +2962,7 @@ function CodeMirrorSceneEditor({ content, onChange, colors, fontSize, fontFamily
     // si é sincronizado à parte, no efeito abaixo, sem recriar o editor a
     // cada letra digitada.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [fontSize, fontFamily, colors]);
+  }, [fontSize, fontFamily, colors, styleHints]);
 
   useEffect(() => {
     const view = viewRef.current;
