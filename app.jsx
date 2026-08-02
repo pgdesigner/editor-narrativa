@@ -556,7 +556,7 @@ function StoryEditor() {
   const [noteFilter, setNoteFilter] = useState("todas");
   const [noteScopeFilter, setNoteScopeFilter] = useState({ cena: true, capitulo: true, geral: true });
   const [paragraphMenuOpen, setParagraphMenuOpen] = useState(false);
-  const [cenaSections, setCenaSections] = useState({ sinopse: true, detalhes: true, personagens: false, fios: false, ferramentas: false, versoes: false, humor: true, entradaFormatacao: false, entradaTags: true, checklist: true });
+  const [cenaSections, setCenaSections] = useState({ sinopse: true, detalhes: true, personagens: false, fios: false, ferramentas: false, anotacoes: false, versoes: false, humor: true, entradaFormatacao: false, entradaTags: true, checklist: true });
   const [workspace, setWorkspace] = useState("manuscrito");
   const [selectedEntry, setSelectedEntry] = useState(null);
   const [glossaryPopover, setGlossaryPopover] = useState(null);
@@ -2017,6 +2017,22 @@ function StoryEditor() {
                       </button>
                     </CollapsibleSection>
 
+                    <CollapsibleSection title="anotações no texto" open={cenaSections.anotacoes} onToggle={() => toggleCenaSection("anotacoes")} colors={colors} count={(currentScene.annotations || []).length}>
+                      {(currentScene.annotations || []).length === 0 ? (
+                        <p className="font-mono text-[10px]" style={{ color: colors.muted }}>nenhuma ainda — digite <span className="font-bold">??</span> em qualquer ponto do texto pra criar uma</p>
+                      ) : (
+                        <div className="space-y-1.5">
+                          {currentScene.annotations.map((a) => (
+                            <div key={a.id} onClick={() => setAnnotationEditor({ id: a.id })} className="flex items-center gap-2 px-2 py-1.5 rounded cursor-pointer" style={{ backgroundColor: colors.deskLight }}>
+                              <span className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ backgroundColor: ANNOTATION_STATUS[a.status]?.color || ANNOTATION_STATUS.resolver.color }} />
+                              <span className="font-body text-xs flex-1 truncate" style={{ color: colors.mutedLight }}>{a.text || "(nota vazia)"}</span>
+                              <button onClick={(e) => { e.stopPropagation(); deleteAnnotation(a.id); }} style={{ color: colors.wine }}><Trash2 size={12} /></button>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </CollapsibleSection>
+
                     <CollapsibleSection title="versões salvas" open={cenaSections.versoes} onToggle={() => toggleCenaSection("versoes")} colors={colors} count={(currentScene.versions || []).length}>
                       <button onClick={saveVersion} className="w-full flex items-center justify-center gap-1 font-mono text-[11px] px-2 py-1.5 mb-2 rounded" style={{ backgroundColor: colors.deskLight, color: colors.mutedLight }}>
                         <Save size={11} /> salvar versão atual
@@ -2953,9 +2969,13 @@ function createAnnotationInputHandler(onCreateRef) {
     const before = from > 0 ? view.state.doc.sliceString(from - 1, from) : "";
     if (before !== "?") return false;
     const id = Math.random().toString(36).slice(2, 8);
+    const marker = `??${id}??`;
+    // Substitui o "?" já digitado (from-1) até o cursor atual pelo marcador
+    // completo — evita montar a string em duas etapas, onde é fácil errar
+    // a contagem de caracteres.
     view.dispatch({
-      changes: { from, to, insert: `${id}??` },
-      selection: { anchor: from + id.length + 2 },
+      changes: { from: from - 1, to, insert: marker },
+      selection: { anchor: from - 1 + marker.length },
     });
     onCreateRef.current(id);
     return true;
