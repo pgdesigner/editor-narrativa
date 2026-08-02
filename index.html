@@ -2,7 +2,11 @@
 <html lang="pt-BR">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <!-- viewport-fit=cover: permite usar env(safe-area-inset-*) no iPhone;
+       interactive-widget=resizes-content: pede pro navegador (Chrome/Android)
+       redimensionar a página quando o teclado abre, em vez de cobri-la.
+       No Safari do iOS, quem resolve é a medição da visual viewport no app. -->
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content" />
   <title>Editor Narrativa — protótipo local</title>
 
   <!-- Tailwind (versão completa via CDN — inclusive classes como text-[10px], que no
@@ -31,7 +35,11 @@
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
 
   <style>
-    html, body, #root { height: 100%; margin: 0; }
+    /* A página em si nunca rola — toda rolagem acontece DENTRO dos painéis
+       do app. Isso impede o Safari do iPhone de "empurrar" a página pra cima
+       quando o teclado abre (a causa da faixa branca e do desalinhamento). */
+    html, body, #root { height: 100%; margin: 0; overflow: hidden; overscroll-behavior: none; }
+    body { position: fixed; inset: 0; width: 100%; }
   </style>
 </head>
 <body>

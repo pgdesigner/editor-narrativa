@@ -690,6 +690,31 @@ function StoryEditor() {
     return () => ro.disconnect();
   }, []);
 
+  // Altura da área REALMENTE visível (visual viewport). No Safari do iPhone,
+  // abrir o teclado não redimensiona a página — o navegador "empurra" tudo
+  // pra cima, deixando uma faixa branca embaixo. Medindo a visual viewport e
+  // usando essa altura no contêiner raiz, o app encolhe junto com o teclado
+  // e devolvemos qualquer rolagem residual da página pra zero.
+  const [viewportHeight, setViewportHeight] = useState(null);
+  useEffect(() => {
+    const vv = typeof window !== "undefined" ? window.visualViewport : null;
+    if (!vv) return;
+    let raf = null;
+    const update = () => {
+      setViewportHeight(Math.round(vv.height));
+      if (raf) cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(() => { window.scrollTo(0, 0); });
+    };
+    vv.addEventListener("resize", update);
+    vv.addEventListener("scroll", update);
+    update();
+    return () => {
+      if (raf) cancelAnimationFrame(raf);
+      vv.removeEventListener("resize", update);
+      vv.removeEventListener("scroll", update);
+    };
+  }, []);
+
   // "pointer: coarse" identifica se a entrada PRINCIPAL do dispositivo é o
   // dedo (touch), não o tamanho da tela — funciona em tablets e celulares,
   // independente da largura, e não depende do texto do user-agent (que
@@ -1372,7 +1397,7 @@ function StoryEditor() {
   const allProjects = Object.values(store.projects);
 
   return (
-    <div ref={rootRef} className="w-full h-screen overflow-hidden" style={{ backgroundColor: colors.desk }}>
+    <div ref={rootRef} className="w-full h-screen overflow-hidden" style={{ backgroundColor: colors.desk, ...(viewportHeight ? { height: `${viewportHeight}px` } : {}) }}>
     <div className="w-full h-full flex flex-col" style={{ zoom: uiScaleValue }}>
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=Fraunces:ital,wght@0,500;0,600;1,500&family=Lora:ital,wght@0,400;0,500;1,400&family=JetBrains+Mono:wght@400;500&display=swap');
@@ -2280,7 +2305,7 @@ function StoryEditor() {
 
       {/* Mobile bottom nav — switches which single panel is visible on small screens */}
       {!focusMode && (
-        <div className={isMobileLayout ? "flex border-t" : "hidden"} style={{ borderColor: colors.deskLight, backgroundColor: colors.desk }}>
+        <div className={isMobileLayout ? "flex border-t" : "hidden"} style={{ borderColor: colors.deskLight, backgroundColor: colors.desk, paddingBottom: "env(safe-area-inset-bottom)" }}>
           {[
             { key: "estrutura", icon: List, label: workspace === "diario" ? "Diários" : "Estrutura" },
             { key: "escrita", icon: Feather, label: "Escrita" },
