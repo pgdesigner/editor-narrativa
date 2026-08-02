@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import ReactDOM from "react-dom/client";
 import { EditorState, RangeSetBuilder } from "@codemirror/state";
-import { EditorView, keymap, ViewPlugin, Decoration } from "@codemirror/view";
+import { EditorView, keymap, ViewPlugin, Decoration, WidgetType } from "@codemirror/view";
 import { history, defaultKeymap, historyKeymap, moveLineUp, moveLineDown, copyLineUp, copyLineDown } from "@codemirror/commands";
 import {
   Plus, Trash2, ChevronDown, ChevronRight, Users, StickyNote, Activity, Feather,
@@ -564,6 +564,7 @@ function StoryEditor() {
   const [visualMode, setVisualMode] = useState(false);
   const [cmMode, setCmMode] = useState(false);
   const [styleHints, setStyleHints] = useState(false);
+  const [annotationEditor, setAnnotationEditor] = useState(null);
   const [contextMenu, setContextMenu] = useState(null);
   const [treeContextMenu, setTreeContextMenu] = useState(null);
   const [movePicker, setMovePicker] = useState(null);
@@ -771,7 +772,7 @@ function StoryEditor() {
 
   const addScene = (actId, chapterId) => {
     const id = uid();
-    const scene = { id, title: "", content: "", tension: 3, status: "rascunho", synopsis: "", pov: "", characterIds: [], threadIds: [], versions: [] };
+    const scene = { id, title: "", content: "", tension: 3, status: "rascunho", synopsis: "", pov: "", characterIds: [], threadIds: [], versions: [], annotations: [] };
     updateProject((p) => ({
       ...p,
       acts: p.acts.map((a) =>
@@ -1013,6 +1014,30 @@ function StoryEditor() {
     const ta = contentTextareaRef.current;
     if (!ta) return;
     linkTextToGlossary(ta.value.substring(ta.selectionStart, ta.selectionEnd));
+  };
+
+  // ---------- anotações no texto (gatilho "??") ----------
+  const createAnnotation = (id) => {
+    updateScene(selectedScene, { annotations: [...(currentScene.annotations || []), { id, text: "", status: "resolver" }] });
+    setAnnotationEditor({ id });
+  };
+  const updateAnnotation = (id, patch) => {
+    updateScene(selectedScene, { annotations: (currentScene.annotations || []).map((a) => (a.id === id ? { ...a, ...patch } : a)) });
+  };
+  const deleteAnnotation = (id) => {
+    const newAnnotations = (currentScene.annotations || []).filter((a) => a.id !== id);
+    const newContent = (currentScene.content || "").replace(new RegExp(`\\?\\?${id}\\?\\?`), "");
+    updateScene(selectedScene, { annotations: newAnnotations, content: newContent });
+    setAnnotationEditor(null);
+    showToast("Nota removida");
+  };
+  // Sempre que o texto muda, remove da lista qualquer anotação cujo símbolo
+  // não exista mais no texto (o usuário pode ter apagado direto no editor).
+  const pruneAnnotations = (newContent, annotationsList) => {
+    if (!annotationsList || annotationsList.length === 0) return annotationsList;
+    const stillPresent = new Set([...newContent.matchAll(ANNOTATION_REGEX)].map((m) => m[1]));
+    const pruned = annotationsList.filter((a) => stillPresent.has(a.id));
+    return pruned.length === annotationsList.length ? annotationsList : pruned;
   };
 
   // Atalhos de teclado estilo VS Code / Word: Ctrl (ou Cmd no Mac) + tecla,
@@ -1704,12 +1729,15 @@ function StoryEditor() {
               ) : cmMode ? (
                 <CodeMirrorSceneEditor
                   content={currentScene.content}
-                  onChange={(v) => updateScene(selectedScene, { content: v })}
+                  onChange={(v) => updateScene(selectedScene, { content: v, annotations: pruneAnnotations(v, currentScene.annotations) })}
                   colors={colors}
                   fontSize={fontSize}
                   fontFamily={fontFamilyValue}
                   onContextMenuEvt={(e) => openTextContextMenu(e, (v) => updateScene(selectedScene, { content: v }), { onCreateNote: createNoteFromText })}
                   styleHints={styleHints}
+                  annotations={currentScene.annotations}
+                  onAnnotationCreate={createAnnotation}
+                  onAnnotationClick={(id) => setAnnotationEditor({ id })}
                 />
               ) : visualMode ? (
                 <div className="w-full break-words" style={{ minHeight: "50vh" }} onClick={(e) => e.stopPropagation()}>
@@ -2458,6 +2486,40 @@ function StoryEditor() {
         </div>
       )}
 
+      {/* Anotação no texto (gatilho ??) */}
+      {annotationEditor && currentScene && (() => {
+        const ann = (currentScene.annotations || []).find((a) => a.id === annotationEditor.id);
+        if (!ann) return null;
+        return (
+          <Modal onClose={() => setAnnotationEditor(null)} colors={colors} title="Nota no texto">
+            <textarea
+              autoFocus
+              className={`${inputBase} font-body text-sm w-full resize-none rounded px-2 py-1.5 mb-3`}
+              style={{ backgroundColor: colors.deskLight, color: colors.mutedLight, minHeight: "80px" }}
+              placeholder="O que você quer lembrar sobre este ponto do texto?"
+              value={ann.text}
+              onChange={(e) => updateAnnotation(ann.id, { text: e.target.value })}
+            />
+            <div className="font-mono text-[10px] uppercase tracking-wide mb-1.5" style={{ color: colors.muted }}>estado</div>
+            <div className="grid grid-cols-3 gap-1.5 mb-3">
+              {Object.entries(ANNOTATION_STATUS).map(([key, s]) => (
+                <button
+                  key={key}
+                  onClick={() => updateAnnotation(ann.id, { status: key })}
+                  className="px-2 py-1.5 rounded font-mono text-xs"
+                  style={{ backgroundColor: ann.status === key ? s.color : colors.deskLight, color: ann.status === key ? "#fff" : colors.mutedLight }}
+                >
+                  {s.label}
+                </button>
+              ))}
+            </div>
+            <button onClick={() => deleteAnnotation(ann.id)} className="w-full flex items-center justify-center gap-1.5 py-1.5 rounded font-mono text-xs" style={{ backgroundColor: colors.deskLight, color: colors.wine }}>
+              <Trash2 size={12} /> excluir nota (remove também do texto)
+            </button>
+          </Modal>
+        );
+      })()}
+
       {/* Color picker (cor do texto selecionado) */}
       {colorPicker && (
         <Modal onClose={() => setColorPicker(null)} colors={colors} title="Cor do texto">
@@ -2814,6 +2876,92 @@ function makeTaAdapter(view) {
   };
 }
 
+// ---------- Anotações no texto (gatilho "??") ----------
+// Marcador embutido no próprio texto: "??abc123??" — só o ID fica no texto,
+// o conteúdo da nota e o estado ficam guardados à parte (em
+// scene.annotations), pra não poluir a leitura do texto.
+const ANNOTATION_REGEX = /\?\?([a-zA-Z0-9]{4,8})\?\?/g;
+const ANNOTATION_STATUS = {
+  resolver: { label: "A resolver", color: "#B23B3B" },
+  resolvendo: { label: "Resolvendo", color: "#B08B3D" },
+  resolvido: { label: "Resolvido", color: "#3F5D54" },
+};
+
+class AnnotationWidget extends WidgetType {
+  constructor(id, status, onClick) {
+    super();
+    this.id = id;
+    this.status = status;
+    this.onClick = onClick;
+  }
+  eq(other) { return other.id === this.id && other.status === this.status; }
+  toDOM() {
+    const span = document.createElement("span");
+    span.textContent = "\u{1F4CC}"; // 📌
+    span.title = `Nota (${ANNOTATION_STATUS[this.status]?.label || "a resolver"}) — clique para abrir`;
+    span.style.cursor = "pointer";
+    span.style.padding = "0 3px";
+    span.style.borderRadius = "999px";
+    span.style.fontSize = "0.75em";
+    span.style.backgroundColor = ANNOTATION_STATUS[this.status]?.color || ANNOTATION_STATUS.resolver.color;
+    span.onmousedown = (e) => { e.preventDefault(); e.stopPropagation(); this.onClick(this.id); };
+    return span;
+  }
+  ignoreEvent() { return true; }
+}
+
+// Construída dentro do componente (não no nível do módulo) pra sempre
+// enxergar a lista de anotações e o callback de clique mais recentes, sem
+// precisar recriar o editor inteiro a cada mudança.
+function createAnnotationDecorationPlugin(annotationsRef, onClickRef) {
+  function build(view) {
+    const builder = new RangeSetBuilder();
+    for (const { from, to } of view.visibleRanges) {
+      let pos = from;
+      while (pos <= to) {
+        const line = view.state.doc.lineAt(pos);
+        const text = line.text;
+        ANNOTATION_REGEX.lastIndex = 0;
+        let m;
+        while ((m = ANNOTATION_REGEX.exec(text)) !== null) {
+          const id = m[1];
+          const ann = annotationsRef.current.find((a) => a.id === id);
+          const status = ann ? ann.status : "resolver";
+          const s = line.from + m.index, e = s + m[0].length;
+          builder.add(s, e, Decoration.replace({ widget: new AnnotationWidget(id, status, (clickedId) => onClickRef.current(clickedId)) }));
+        }
+        pos = line.to + 1;
+      }
+    }
+    return builder.finish();
+  }
+  return ViewPlugin.fromClass(
+    class {
+      constructor(view) { this.decorations = build(view); }
+      update(update) { this.decorations = build(update.view); }
+    },
+    { decorations: (v) => v.decorations }
+  );
+}
+
+// Digitar "?" logo depois de outro "?" (formando "??") cria uma nova
+// anotação: gera um ID curto, embute "??id??" no texto e avisa o app pra
+// criar o registro da nota e abrir o editor dela.
+function createAnnotationInputHandler(onCreateRef) {
+  return EditorView.inputHandler.of((view, from, to, insertedText) => {
+    if (from !== to || insertedText !== "?") return false;
+    const before = from > 0 ? view.state.doc.sliceString(from - 1, from) : "";
+    if (before !== "?") return false;
+    const id = Math.random().toString(36).slice(2, 8);
+    view.dispatch({
+      changes: { from, to, insert: `${id}??` },
+      selection: { anchor: from + id.length + 2 },
+    });
+    onCreateRef.current(id);
+    return true;
+  });
+}
+
 const markdownDecorationPlugin = ViewPlugin.fromClass(
   class {
     constructor(view) {
@@ -2916,13 +3064,19 @@ function applyExternalContentChange(view, newContent) {
   });
 }
 
-function CodeMirrorSceneEditor({ content, onChange, colors, fontSize, fontFamily, onContextMenuEvt, styleHints }) {
+function CodeMirrorSceneEditor({ content, onChange, colors, fontSize, fontFamily, onContextMenuEvt, styleHints, annotations, onAnnotationCreate, onAnnotationClick }) {
   const containerRef = useRef(null);
   const viewRef = useRef(null);
   const onChangeRef = useRef(onChange);
   onChangeRef.current = onChange;
   const onContextMenuRef = useRef(onContextMenuEvt);
   onContextMenuRef.current = onContextMenuEvt;
+  const annotationsRef = useRef(annotations || []);
+  annotationsRef.current = annotations || [];
+  const onAnnotationCreateRef = useRef(onAnnotationCreate);
+  onAnnotationCreateRef.current = onAnnotationCreate;
+  const onAnnotationClickRef = useRef(onAnnotationClick);
+  onAnnotationClickRef.current = onAnnotationClick;
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -2943,12 +3097,16 @@ function CodeMirrorSceneEditor({ content, onChange, colors, fontSize, fontFamily
         return true;
       },
     });
+    const annotationDecorations = createAnnotationDecorationPlugin(annotationsRef, onAnnotationClickRef);
+    const annotationInputHandler = createAnnotationInputHandler(onAnnotationCreateRef);
     const state = EditorState.create({
       doc: content,
       extensions: [
         ...cmBaseExtensions,
         theme,
         contextMenuHandler,
+        annotationDecorations,
+        annotationInputHandler,
         ...(styleHints ? [styleHintPlugin, styleHintTheme] : []),
         EditorView.updateListener.of((update) => {
           if (update.docChanged) onChangeRef.current(update.state.doc.toString());
@@ -2969,6 +3127,14 @@ function CodeMirrorSceneEditor({ content, onChange, colors, fontSize, fontFamily
     if (!view) return;
     applyExternalContentChange(view, content || "");
   }, [content]);
+
+  // Anotações podem mudar de estado (resolver/resolvendo/resolvido) sem o
+  // texto em si mudar — força os ícones a se redesenharem com a cor certa.
+  useEffect(() => {
+    const view = viewRef.current;
+    if (!view) return;
+    view.dispatch({});
+  }, [annotations]);
 
   return <div ref={containerRef} className="w-full break-words" style={{ minHeight: "50vh" }} />;
 }
