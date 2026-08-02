@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Editor Narrativa — protótipo local</title>
+
+  <!-- Tailwind (versão completa via CDN — inclusive classes como text-[10px], que no
+       ambiente de artifacts do Claude funcionam de forma mais limitada) -->
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <!-- Mapa de importação: resolve "react", "react-dom/client", "lucide-react" e
+       "recharts" a partir do esm.sh, sem precisar instalar nada localmente -->
+  <script type="importmap">
+  {
+    "imports": {
+      "react": "https://esm.sh/react@18.3.1",
+      "react-dom/client": "https://esm.sh/react-dom@18.3.1/client?external=react",
+      "lucide-react": "https://esm.sh/lucide-react@0.383.0?external=react",
+      "recharts": "https://esm.sh/recharts@2.12.7?external=react,react-dom"
+    }
+  }
+  </script>
+
+  <!-- Babel Standalone: transforma o JSX no navegador, sem build/instalação -->
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+  <style>
+    html, body, #root { height: 100%; margin: 0; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <!-- data-type="module" faz o Babel transformar mantendo import/export como
+       ES module de verdade, para casar com o mapa de importação acima -->
+  <script type="text/babel" data-type="module" data-presets="react" src="./app.jsx"></script>
+</body>
+</html>
