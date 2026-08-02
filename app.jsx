@@ -1,9 +1,8 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import ReactDOM from "react-dom/client";
-import CodeMirror from "@uiw/react-codemirror";
-import { EditorView } from "@codemirror/view";
+import { EditorState } from "@codemirror/state";
+import { EditorView, keymap } from "@codemirror/view";
 import { history, defaultKeymap, historyKeymap } from "@codemirror/commands";
-import { keymap } from "@codemirror/view";
 import {
   Plus, Trash2, ChevronDown, ChevronRight, Users, StickyNote, Activity, Feather,
   X, Focus, Settings, Search, BookOpen, LayoutGrid, List, Network, Download,
@@ -2615,9 +2614,9 @@ function TreeLabel({ id, value, onChange, renamingId, setRenamingId, className, 
 // mantém cursor, seleção, desfazer e teclado mobile funcionando normalmente,
 // sem precisar reimplementar nada disso à mão. Clicar fora recolhe de novo.
 // Editor baseado em CodeMirror 6 — o mesmo motor de edição por trás do
-// Obsidian e do VS Code. Etapa 1: só a base funcionando (digitar, cursor,
-// desfazer, colar) sem nenhuma decoração de sintaxe ainda — isso vem depois,
-// uma vez confirmado que o alicerce está sólido no navegador de verdade.
+// Obsidian e do VS Code. Integração própria e enxuta com o React (em vez de
+// um pacote "de conveniência" de terceiros), pra não depender de versões
+// externas que podem não bater entre si.
 const cmBaseExtensions = [
   EditorView.lineWrapping,
   history(),
@@ -2625,26 +2624,50 @@ const cmBaseExtensions = [
 ];
 
 function CodeMirrorSceneEditor({ content, onChange, colors, fontSize, fontFamily }) {
-  const theme = EditorView.theme({
-    "&": { fontSize: `${fontSize}px`, backgroundColor: "transparent" },
-    ".cm-content": { fontFamily, color: colors.ink, padding: 0, caretColor: colors.ink },
-    ".cm-line": { padding: 0, lineHeight: 1.7 },
-    "&.cm-focused": { outline: "none" },
-    ".cm-scroller": { fontFamily, overflow: "visible" },
-    ".cm-gutters": { display: "none" },
-  });
+  const containerRef = useRef(null);
+  const viewRef = useRef(null);
+  const onChangeRef = useRef(onChange);
+  onChangeRef.current = onChange;
 
-  return (
-    <div className="w-full break-words" style={{ minHeight: "50vh" }}>
-      <CodeMirror
-        value={content}
-        onChange={(value) => onChange(value)}
-        basicSetup={false}
-        extensions={[...cmBaseExtensions, theme]}
-        placeholder="Era uma vez…"
-      />
-    </div>
-  );
+  useEffect(() => {
+    if (!containerRef.current) return;
+    const theme = EditorView.theme({
+      "&": { fontSize: `${fontSize}px`, backgroundColor: "transparent" },
+      ".cm-content": { fontFamily, color: colors.ink, padding: 0, caretColor: colors.ink },
+      ".cm-line": { padding: 0, lineHeight: 1.7 },
+      "&.cm-focused": { outline: "none" },
+      ".cm-scroller": { fontFamily, overflow: "visible" },
+      ".cm-gutters": { display: "none" },
+    });
+    const state = EditorState.create({
+      doc: content,
+      extensions: [
+        ...cmBaseExtensions,
+        theme,
+        EditorView.updateListener.of((update) => {
+          if (update.docChanged) onChangeRef.current(update.state.doc.toString());
+        }),
+      ],
+    });
+    const view = new EditorView({ state, parent: containerRef.current });
+    viewRef.current = view;
+    return () => { view.destroy(); viewRef.current = null; };
+    // Recria o editor só quando a aparência muda (fonte/tema) — o texto em
+    // si é sincronizado à parte, no efeito abaixo, sem recriar o editor a
+    // cada letra digitada.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fontSize, fontFamily, colors]);
+
+  useEffect(() => {
+    const view = viewRef.current;
+    if (!view) return;
+    const current = view.state.doc.toString();
+    if (current !== content) {
+      view.dispatch({ changes: { from: 0, to: current.length, insert: content || "" } });
+    }
+  }, [content]);
+
+  return <div ref={containerRef} className="w-full break-words" style={{ minHeight: "50vh" }} />;
 }
 
 function VisualMarkdownEditor({ content, onChange, glossary, onTermClick, colors, fontSize, fontFamily }) {
