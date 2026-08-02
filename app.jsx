@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import ReactDOM from "react-dom/client";
-import { EditorState } from "@codemirror/state";
-import { EditorView, keymap } from "@codemirror/view";
+import { EditorState, RangeSetBuilder } from "@codemirror/state";
+import { EditorView, keymap, ViewPlugin, Decoration } from "@codemirror/view";
 import { history, defaultKeymap, historyKeymap } from "@codemirror/commands";
 import {
   Plus, Trash2, ChevronDown, ChevronRight, Users, StickyNote, Activity, Feather,
@@ -2613,6 +2613,94 @@ function TreeLabel({ id, value, onChange, renamingId, setRenamingId, className, 
 // clicar nele revela a marcação crua numa textarea nativa de verdade — o que
 // mantém cursor, seleção, desfazer e teclado mobile funcionando normalmente,
 // sem precisar reimplementar nada disso à mão. Clicar fora recolhe de novo.
+// Decoração de sintaxe ao estilo Obsidian: fora da linha onde está o cursor,
+// os símbolos (**, ##, {{c:...}}) somem e o texto aparece formatado de
+// verdade (negrito, título grande, cor). Na linha onde o cursor está, os
+// símbolos ficam visíveis (só um pouco apagados), pra você poder editá-los.
+const MD_COLOR_MAP = { vermelho: "#B23B3B", verde: "#3F5D54", azul: "#4A6FA5", roxo: "#7A5C9E", dourado: "#B08B3D" };
+const MD_INLINE_REGEX = /\*\*\*([^*]+)\*\*\*|\*\*([^*]+)\*\*|\*([^*]+)\*|~~([^~]+)~~|==([^=]+)==|\{\{c:(vermelho|verde|azul|roxo|dourado)\}\}([^{]*)\{\{\/c\}\}/g;
+
+function computeMarkdownDecorations(view) {
+  const builder = new RangeSetBuilder();
+  const cursorLine = view.state.doc.lineAt(view.state.selection.main.head).number;
+
+  for (const { from, to } of view.visibleRanges) {
+    let pos = from;
+    while (pos <= to) {
+      const line = view.state.doc.lineAt(pos);
+      const text = line.text;
+      const active = line.number === cursorLine;
+      let contentStart = 0;
+
+      const prefixMatch = text.match(/^(#{1,3}|>) /);
+      if (prefixMatch) {
+        const lineClass =
+          prefixMatch[1] === ">" ? "cm-md-quote-line" :
+          prefixMatch[1].length === 1 ? "cm-md-h1-line" :
+          prefixMatch[1].length === 2 ? "cm-md-h2-line" : "cm-md-h3-line";
+        builder.add(line.from, line.from, Decoration.line({ class: lineClass }));
+
+        const markerEnd = line.from + prefixMatch[0].length;
+        builder.add(line.from, markerEnd, active ? Decoration.mark({ class: "cm-md-marker" }) : Decoration.replace({}));
+        contentStart = prefixMatch[0].length;
+      }
+
+      MD_INLINE_REGEX.lastIndex = contentStart;
+      let m;
+      while ((m = MD_INLINE_REGEX.exec(text)) !== null) {
+        const mStart = line.from + m.index;
+        const mEnd = mStart + m[0].length;
+        if (m[6] !== undefined) {
+          const openLen = `{{c:${m[6]}}}`.length, closeLen = 6;
+          builder.add(mStart, mStart + openLen, active ? Decoration.mark({ class: "cm-md-marker" }) : Decoration.replace({}));
+          builder.add(mStart + openLen, mEnd - closeLen, Decoration.mark({ attributes: { style: `color:${MD_COLOR_MAP[m[6]]}` } }));
+          builder.add(mEnd - closeLen, mEnd, active ? Decoration.mark({ class: "cm-md-marker" }) : Decoration.replace({}));
+          continue;
+        }
+        let markerLen, cls;
+        if (m[1] !== undefined) { markerLen = 3; cls = "cm-md-boldital"; }
+        else if (m[2] !== undefined) { markerLen = 2; cls = "cm-md-bold"; }
+        else if (m[3] !== undefined) { markerLen = 1; cls = "cm-md-ital"; }
+        else if (m[4] !== undefined) { markerLen = 2; cls = "cm-md-strike"; }
+        else { markerLen = 2; cls = "cm-md-highlight"; }
+        builder.add(mStart, mStart + markerLen, active ? Decoration.mark({ class: "cm-md-marker" }) : Decoration.replace({}));
+        builder.add(mStart + markerLen, mEnd - markerLen, Decoration.mark({ class: cls }));
+        builder.add(mEnd - markerLen, mEnd, active ? Decoration.mark({ class: "cm-md-marker" }) : Decoration.replace({}));
+      }
+
+      pos = line.to + 1;
+    }
+  }
+  return builder.finish();
+}
+
+const markdownDecorationPlugin = ViewPlugin.fromClass(
+  class {
+    constructor(view) {
+      this.decorations = computeMarkdownDecorations(view);
+    }
+    update(update) {
+      if (update.docChanged || update.selectionSet || update.viewportChanged) {
+        this.decorations = computeMarkdownDecorations(update.view);
+      }
+    }
+  },
+  { decorations: (v) => v.decorations }
+);
+
+const markdownSyntaxTheme = EditorView.theme({
+  ".cm-md-marker": { opacity: "0.45" },
+  ".cm-md-bold": { fontWeight: "700" },
+  ".cm-md-ital": { fontStyle: "italic" },
+  ".cm-md-boldital": { fontWeight: "700", fontStyle: "italic" },
+  ".cm-md-strike": { textDecoration: "line-through", opacity: "0.6" },
+  ".cm-md-highlight": { backgroundColor: "rgba(176,139,61,.35)" },
+  ".cm-md-h1-line": { fontSize: "1.5em", fontWeight: "700" },
+  ".cm-md-h2-line": { fontSize: "1.25em", fontWeight: "700" },
+  ".cm-md-h3-line": { fontSize: "1.1em", fontWeight: "600" },
+  ".cm-md-quote-line": { fontStyle: "italic", opacity: "0.9", borderLeft: "3px solid currentColor", paddingLeft: "0.6em" },
+});
+
 // Editor baseado em CodeMirror 6 — o mesmo motor de edição por trás do
 // Obsidian e do VS Code. Integração própria e enxuta com o React (em vez de
 // um pacote "de conveniência" de terceiros), pra não depender de versões
@@ -2621,6 +2709,8 @@ const cmBaseExtensions = [
   EditorView.lineWrapping,
   history(),
   keymap.of([...defaultKeymap, ...historyKeymap]),
+  markdownDecorationPlugin,
+  markdownSyntaxTheme,
 ];
 
 function CodeMirrorSceneEditor({ content, onChange, colors, fontSize, fontFamily }) {
