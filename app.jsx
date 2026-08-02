@@ -202,38 +202,12 @@ function wrapSelectionInTextarea(ta, before, after, onChange) {
   });
 }
 
-// Encontra a posição em pixels do cursor dentro de um <textarea> — os
-// navegadores não expõem isso diretamente, então a técnica padrão é criar um
-// "espelho" invisível com o mesmo texto e as mesmas fontes, e medir onde o
-// texto até o cursor termina nele.
-function getCaretCoordinates(ta) {
-  const div = document.createElement("div");
-  const style = getComputedStyle(ta);
-  const props = [
-    "boxSizing", "width", "paddingTop", "paddingRight", "paddingBottom", "paddingLeft",
-    "borderTopWidth", "borderRightWidth", "borderBottomWidth", "borderLeftWidth",
-    "fontFamily", "fontSize", "fontWeight", "lineHeight", "letterSpacing", "textIndent",
-  ];
-  props.forEach((p) => { div.style[p] = style[p]; });
-  div.style.position = "absolute";
-  div.style.visibility = "hidden";
-  div.style.whiteSpace = "pre-wrap";
-  div.style.wordWrap = "break-word";
-  div.style.top = "0";
-  div.style.left = "-9999px";
-  document.body.appendChild(div);
-  div.textContent = ta.value.substring(0, ta.selectionStart);
-  const span = document.createElement("span");
-  span.textContent = ta.value.substring(ta.selectionStart) || ".";
-  div.appendChild(span);
-  const rect = ta.getBoundingClientRect();
-  const lineHeight = parseInt(style.lineHeight, 10) || 20;
-  const coords = {
-    x: rect.left + span.offsetLeft - ta.scrollLeft,
-    y: rect.top + span.offsetTop - ta.scrollTop + lineHeight,
-  };
-  document.body.removeChild(div);
-  return coords;
+// Faz uma <textarea> crescer junto com o conteúdo, em vez de criar uma barra
+// de rolagem interna — o contêiner da página é quem rola.
+function autoGrowTextarea(el) {
+  if (!el) return;
+  el.style.height = "auto";
+  el.style.height = `${el.scrollHeight}px`;
 }
 
 function toggleWrapSelectionInTextarea(ta, before, after, onChange) {
@@ -417,7 +391,10 @@ function renderMarkdownLine(line, key, glossary, onTermClick) {
 }
 
 function renderMarkdownContent(content, glossary, onTermClick) {
-  const lines = (content || "").split("\n");
+  // No modo leitura os pins de anotação ("??id??") não aparecem — são
+  // ferramenta de escrita, não parte do texto final.
+  const cleaned = (content || "").replace(/\?\?[a-zA-Z0-9]{4,8}\?\?/g, "");
+  const lines = cleaned.split("\n");
   return lines.map((line, i) => renderMarkdownLine(line, i, glossary, onTermClick));
 }
 
@@ -556,20 +533,17 @@ function StoryEditor() {
   const [noteFilter, setNoteFilter] = useState("todas");
   const [noteScopeFilter, setNoteScopeFilter] = useState({ cena: true, capitulo: true, geral: true });
   const [paragraphMenuOpen, setParagraphMenuOpen] = useState(false);
-  const [cenaSections, setCenaSections] = useState({ sinopse: true, detalhes: true, personagens: false, fios: false, ferramentas: false, anotacoes: false, versoes: false, humor: true, entradaFormatacao: false, entradaTags: true, checklist: true });
+  const [cenaSections, setCenaSections] = useState({ sinopse: true, detalhes: true, personagens: false, fios: false, anotacoes: false, versoes: false, humor: true, entradaFormatacao: false, entradaTags: true, checklist: true });
   const [workspace, setWorkspace] = useState("manuscrito");
   const [selectedEntry, setSelectedEntry] = useState(null);
   const [glossaryPopover, setGlossaryPopover] = useState(null);
   const [readMode, setReadMode] = useState(false);
-  const [visualMode, setVisualMode] = useState(false);
-  const [cmMode, setCmMode] = useState(false);
   const [styleHints, setStyleHints] = useState(false);
   const [annotationEditor, setAnnotationEditor] = useState(null);
   const [contextMenu, setContextMenu] = useState(null);
   const [treeContextMenu, setTreeContextMenu] = useState(null);
   const [movePicker, setMovePicker] = useState(null);
   const [colorPicker, setColorPicker] = useState(null);
-  const [colorAutocomplete, setColorAutocomplete] = useState(null);
   const [renamingId, setRenamingId] = useState(null);
   const [toast, setToast] = useState(null);
   const dragRef = useRef(null);
@@ -1040,13 +1014,83 @@ function StoryEditor() {
     return pruned.length === annotationsList.length ? annotationsList : pruned;
   };
 
+  // Procura o registro de uma anotação em qualquer cena do projeto — usado
+  // quando um pin é colado vindo de outra cena, pra clonar o conteúdo dele.
+  const findAnnotationAnywhere = (id) => {
+    for (const a of project.acts) for (const c of a.chapters) for (const s of c.scenes) {
+      const found = (s.annotations || []).find((an) => an.id === id);
+      if (found) return found;
+    }
+    return null;
+  };
+
+  const freshAnnotationId = (taken, length) => {
+    let id;
+    do {
+      id = Math.random().toString(36).slice(2, 2 + length).padEnd(length, "0");
+    } while (taken.has(id));
+    return id;
+  };
+
+  // Garante que cada marcador "??id??" do texto tenha um ID exclusivo e um
+  // registro próprio. Copiar e colar um pin gera um novo ID (com o conteúdo
+  // da nota original clonado), pra que editar a cópia não altere o original.
+  // Um pin colado vindo de outra cena também ganha um registro independente.
+  const reconcileAnnotationMarkers = (content, annotationsList) => {
+    const list = [...(annotationsList || [])];
+    const taken = new Set(list.map((a) => a.id));
+    const seen = new Set();
+    let text = content;
+    let changed = false;
+    const regex = new RegExp(ANNOTATION_REGEX.source, "g");
+    let m;
+    while ((m = regex.exec(text)) !== null) {
+      const id = m[1];
+      if (!seen.has(id)) {
+        seen.add(id);
+        taken.add(id);
+        if (!list.some((a) => a.id === id)) {
+          const src = findAnnotationAnywhere(id);
+          list.push(src ? { ...src } : { id, text: "", status: "resolver" });
+          changed = true;
+        }
+        continue;
+      }
+      // Ocorrência repetida do mesmo ID — novo ID do mesmo comprimento (não
+      // desloca o resto do texto) e clone independente do registro.
+      const fresh = freshAnnotationId(taken, id.length);
+      taken.add(fresh);
+      seen.add(fresh);
+      const start = m.index + 2; // pula o "??" de abertura
+      text = text.slice(0, start) + fresh + text.slice(start + id.length);
+      const src = list.find((a) => a.id === id) || findAnnotationAnywhere(id);
+      list.push({ ...(src || { text: "", status: "resolver" }), id: fresh });
+      changed = true;
+      regex.lastIndex = m.index + m[0].length;
+    }
+    return changed ? { content: text, annotations: list } : { content, annotations: annotationsList };
+  };
+
+  // Ponto único por onde toda mudança no texto da cena passa (digitação,
+  // colar, menu de formatação, atalhos) — aplica a deduplicação de pins e a
+  // limpeza de registros órfãos antes de salvar.
+  const handleSceneContentChange = (v) => {
+    const rec = reconcileAnnotationMarkers(v, currentScene?.annotations);
+    updateScene(selectedScene, { content: rec.content, annotations: pruneAnnotations(rec.content, rec.annotations) });
+  };
+
+  // Rola a tela até a posição exata do pin no texto (e sai do modo leitura /
+  // troca pro painel de escrita no celular, se preciso, antes de rolar).
+  const jumpToAnnotation = (id) => {
+    const needsModeSwitch = readMode || (isMobileLayout && mobilePanel !== "escrita");
+    if (readMode) setReadMode(false);
+    if (isMobileLayout) setMobilePanel("escrita");
+    setTimeout(() => { contentTextareaRef.current?.scrollToAnnotation?.(id); }, needsModeSwitch ? 180 : 30);
+  };
+
   // Atalhos de teclado estilo VS Code / Word: Ctrl (ou Cmd no Mac) + tecla,
   // agindo sobre a seleção atual da caixa de texto.
   const handleEditorKeyDown = (e, onChange) => {
-    if (e.key === "Escape" && colorAutocomplete) {
-      setColorAutocomplete(null);
-      return;
-    }
     const isMod = e.metaKey || e.ctrlKey;
     if (!isMod) return;
     const ta = e.target;
@@ -1074,35 +1118,6 @@ function StoryEditor() {
       e.preventDefault();
       setColorPicker({ taEl: ta, onChange });
     }
-  };
-
-  // Detecta o gatilho "{{c:" logo antes do cursor (estilo autocompletar do
-  // VS Code) e mostra as opções de cor que combinam com o que já foi digitado.
-  const checkColorAutocomplete = (ta, onChange) => {
-    const pos = ta.selectionStart;
-    const uptoCursor = ta.value.slice(Math.max(0, pos - 24), pos);
-    const m = uptoCursor.match(/\{\{c:([a-zà-ú]*)$/i);
-    if (!m) { setColorAutocomplete(null); return; }
-    const query = m[1].toLowerCase();
-    const options = TEXT_COLORS.filter((c) => c.key.startsWith(query));
-    if (options.length === 0) { setColorAutocomplete(null); return; }
-    const coords = getCaretCoordinates(ta);
-    setColorAutocomplete({ taEl: ta, onChange, triggerStart: pos - query.length, options, x: coords.x, y: coords.y });
-  };
-
-  const applyColorAutocomplete = (colorKey) => {
-    if (!colorAutocomplete) return;
-    const { taEl, onChange, triggerStart } = colorAutocomplete;
-    const value = taEl.value;
-    const insertion = `${colorKey}}}`;
-    const newValue = value.slice(0, triggerStart) + insertion + value.slice(taEl.selectionStart);
-    onChange(newValue);
-    setColorAutocomplete(null);
-    requestAnimationFrame(() => {
-      taEl.focus();
-      const pos = triggerStart + insertion.length;
-      taEl.setSelectionRange(pos, pos);
-    });
   };
 
   // ---------- context menu ----------
@@ -1232,7 +1247,9 @@ function StoryEditor() {
     }));
     showToast("Versão salva");
   };
-  const restoreVersion = (content) => { updateScene(selectedScene, { content }); showToast("Versão restaurada"); };
+  // Restaurar passa pelo mesmo caminho da digitação — assim os pins da
+  // versão restaurada são reconciliados (registros recriados/clonados).
+  const restoreVersion = (content) => { handleSceneContentChange(content); showToast("Versão restaurada"); };
 
   // ---------- projects ----------
   const createProject = () => {
@@ -1683,12 +1700,12 @@ function StoryEditor() {
                 </div>
 
                 <textarea
-                  ref={entryTextareaRef}
-                  className={`${inputBase} font-body leading-relaxed w-full resize-none`}
+                  ref={(el) => { entryTextareaRef.current = el; autoGrowTextarea(el); }}
+                  className={`${inputBase} font-body leading-relaxed w-full resize-none overflow-hidden`}
                   style={{ color: colors.ink, minHeight: "50vh", fontSize: `${fontSize}px` }}
                   placeholder="Escreva livremente…"
                   value={currentEntry.content}
-                  onChange={(e) => updateEntry(selectedEntry, { content: e.target.value })}
+                  onChange={(e) => { updateEntry(selectedEntry, { content: e.target.value }); autoGrowTextarea(e.target); }}
                   onKeyDown={(e) => handleEditorKeyDown(e, (v) => updateEntry(selectedEntry, { content: v }))}
                   onContextMenu={(e) => openTextContextMenu(e, (v) => updateEntry(selectedEntry, { content: v }), { onCreateNote: createNoteFromText })}
                   {...onLongPress((e) => openTextContextMenu(e, (v) => updateEntry(selectedEntry, { content: v }), { onCreateNote: createNoteFromText }))}
@@ -1712,10 +1729,84 @@ function StoryEditor() {
                   onClick={() => { setRightTab("cena"); setFocusMode(false); setMobilePanel("detalhes"); }}
                   className="flex-shrink-0 flex items-center gap-1 font-mono text-[10px] px-2 py-1.5 rounded"
                   style={{ backgroundColor: colors.paperEdge, color: colors.muted }}
-                  title="Sinopse, status, personagens, ferramentas de escrita e versões"
+                  title="Sinopse, status, personagens, fios, anotações e versões da cena"
                 >
                   <SlidersHorizontal size={11} /> detalhes
                 </button>
+              </div>
+
+              {/* Barra de ferramentas do texto — tudo que age sobre o texto
+                  mora aqui, junto do editor (não no painel da Cena). */}
+              <div className="flex flex-wrap items-center gap-1.5 mb-4 pb-3" style={{ borderBottom: `1px solid ${colors.paperEdge}` }}>
+                <button
+                  onClick={() => { setReadMode((r) => !r); showToast(!readMode ? "Modo leitura" : "Modo Mirror — escrita"); }}
+                  className="flex items-center gap-1 font-mono text-[10px] px-2 py-1 rounded"
+                  style={{ backgroundColor: readMode ? colors.gold : colors.paperEdge, color: readMode ? colors.ink : colors.muted }}
+                  title={readMode ? "Voltar ao Modo Mirror (escrita)" : "Modo leitura — markdown convertido em visual"}
+                >
+                  {readMode ? <EyeOff size={11} /> : <Eye size={11} />} {readMode ? "escrever" : "leitura"}
+                </button>
+                {!readMode && (
+                  <>
+                    <span className="w-px h-4 mx-0.5" style={{ backgroundColor: colors.paperEdge }} />
+                    <button onClick={() => { insertDialogueLine(contentTextareaRef.current, handleSceneContentChange); showToast("Fala inserida"); }} className="flex items-center gap-1 font-mono text-[10px] px-2 py-1 rounded" style={{ backgroundColor: colors.paperEdge, color: colors.muted }} title="Inserir fala de personagem">
+                      <Quote size={11} /> diálogo
+                    </button>
+                    <button onClick={() => { insertSceneBreak(contentTextareaRef.current, handleSceneContentChange); showToast("Quebra de cena inserida"); }} className="flex items-center gap-1 font-mono text-[10px] px-2 py-1 rounded" style={{ backgroundColor: colors.paperEdge, color: colors.muted }} title="Inserir quebra de cena (* * *)">
+                      <Minus size={11} /> quebra
+                    </button>
+                    <div className="relative" ref={paragraphMenuRef}>
+                      <button onClick={() => setParagraphMenuOpen((o) => !o)} className="flex items-center gap-1 font-mono text-[10px] px-2 py-1 rounded" style={{ backgroundColor: paragraphMenuOpen ? colors.gold : colors.paperEdge, color: paragraphMenuOpen ? colors.ink : colors.muted }} title="Estilo do parágrafo atual">
+                        <Pilcrow size={11} /> parágrafo
+                      </button>
+                      {paragraphMenuOpen && (
+                        <div className="absolute left-0 top-full mt-1 z-20 w-44 rounded shadow-2xl p-1" style={{ backgroundColor: colors.panel }}>
+                          {PARAGRAPH_STYLES.map((ps) => (
+                            <button
+                              key={ps.key}
+                              onClick={() => {
+                                const applied = applyParagraphStyle(contentTextareaRef.current, ps.key, handleSceneContentChange);
+                                setParagraphMenuOpen(false);
+                                if (applied) {
+                                  showToast(`Parágrafo: ${ps.label}`);
+                                } else if (ps.key === "h1") {
+                                  showToast("Já existe um Título grande nesta cena");
+                                } else if (ps.key === "h2") {
+                                  showToast("Adicione um Título grande antes deste");
+                                } else if (ps.key === "h3") {
+                                  showToast("Adicione um Título antes deste");
+                                }
+                              }}
+                              className="w-full px-2 py-1.5 rounded font-mono text-xs text-left"
+                              style={{ color: colors.mutedLight }}
+                            >
+                              {ps.label}
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                    <button
+                      onClick={(e) => openTextContextMenu(e, handleSceneContentChange, { onCreateNote: createNoteFromText, taOverride: contentTextareaRef.current })}
+                      className="flex items-center gap-1 font-mono text-[10px] px-2 py-1 rounded"
+                      style={{ backgroundColor: colors.paperEdge, color: colors.muted }}
+                      title="Formatar a seleção atual (negrito, itálico, cor…)"
+                    >
+                      <Bold size={11} /> formatar
+                    </button>
+                    <button onClick={linkSelectionToGlossary} className="flex items-center gap-1 font-mono text-[10px] px-2 py-1 rounded" style={{ backgroundColor: colors.paperEdge, color: colors.muted }} title="Vincular a seleção ao glossário">
+                      <Link2 size={11} /> glossário
+                    </button>
+                    <button
+                      onClick={() => { setStyleHints((v) => !v); showToast(!styleHints ? "Vícios de linguagem — advérbios em -mente e palavras repetidas" : "Vícios de linguagem desligado"); }}
+                      className="flex items-center gap-1 font-mono text-[10px] px-2 py-1 rounded"
+                      style={{ backgroundColor: styleHints ? colors.gold : colors.paperEdge, color: styleHints ? colors.ink : colors.muted }}
+                      title="Destacar advérbios em -mente e palavras repetidas"
+                    >
+                      <Sparkles size={11} /> vícios
+                    </button>
+                  </>
+                )}
               </div>
 
               {readMode ? (
@@ -1726,42 +1817,20 @@ function StoryEditor() {
                 >
                   {renderMarkdownContent(currentScene.content, project.glossary, (g) => setGlossaryPopover(g))}
                 </div>
-              ) : cmMode ? (
+              ) : (
                 <CodeMirrorSceneEditor
                   content={currentScene.content}
-                  onChange={(v) => updateScene(selectedScene, { content: v, annotations: pruneAnnotations(v, currentScene.annotations) })}
+                  onChange={handleSceneContentChange}
                   colors={colors}
                   fontSize={fontSize}
                   fontFamily={fontFamilyValue}
-                  onContextMenuEvt={(e) => openTextContextMenu(e, (v) => updateScene(selectedScene, { content: v }), { onCreateNote: createNoteFromText })}
+                  onContextMenuEvt={(e) => openTextContextMenu(e, handleSceneContentChange, { onCreateNote: createNoteFromText })}
+                  onEditorKeyDown={(e) => handleEditorKeyDown(e, handleSceneContentChange)}
                   styleHints={styleHints}
                   annotations={currentScene.annotations}
                   onAnnotationCreate={createAnnotation}
                   onAnnotationClick={(id) => setAnnotationEditor({ id })}
-                />
-              ) : visualMode ? (
-                <div className="w-full break-words" style={{ minHeight: "50vh" }} onClick={(e) => e.stopPropagation()}>
-                  <VisualMarkdownEditor
-                    content={currentScene.content}
-                    onChange={(v) => updateScene(selectedScene, { content: v })}
-                    glossary={project.glossary}
-                    onTermClick={(g) => setGlossaryPopover(g)}
-                    colors={colors}
-                    fontSize={fontSize}
-                    fontFamily={fontFamilyValue}
-                  />
-                </div>
-              ) : (
-                <textarea
-                  ref={contentTextareaRef}
-                  className={`${inputBase} leading-relaxed w-full resize-none break-words`}
-                  style={{ color: colors.ink, minHeight: "50vh", fontSize: `${fontSize}px`, fontFamily: fontFamilyValue }}
-                  placeholder="Era uma vez…"
-                  value={currentScene.content}
-                  onChange={(e) => { updateScene(selectedScene, { content: e.target.value }); checkColorAutocomplete(e.target, (v) => updateScene(selectedScene, { content: v })); }}
-                  onKeyDown={(e) => handleEditorKeyDown(e, (v) => updateScene(selectedScene, { content: v }))}
-                  onContextMenu={(e) => openTextContextMenu(e, (v) => updateScene(selectedScene, { content: v }), { onCreateNote: createNoteFromText })}
-                  {...onLongPress((e) => openTextContextMenu(e, (v) => updateScene(selectedScene, { content: v }), { onCreateNote: createNoteFromText }))}
+                  apiRef={contentTextareaRef}
                 />
               )}
 
@@ -1915,115 +1984,13 @@ function StoryEditor() {
                       </CollapsibleSection>
                     )}
 
-                    <CollapsibleSection title="ferramentas de escrita" open={cenaSections.ferramentas} onToggle={() => toggleCenaSection("ferramentas")} colors={colors}>
-                      <div className="flex flex-wrap gap-1.5 mb-2">
-                        <button onClick={() => { insertDialogueLine(contentTextareaRef.current, (v) => updateScene(selectedScene, { content: v })); showToast("Fala inserida"); }} disabled={readMode || visualMode} className="flex items-center gap-1 font-mono text-[10px] px-2 py-1 rounded disabled:opacity-30" style={{ backgroundColor: colors.deskLight, color: colors.mutedLight }}>
-                          <Quote size={11} /> diálogo
-                        </button>
-                        <button onClick={() => { insertSceneBreak(contentTextareaRef.current, (v) => updateScene(selectedScene, { content: v })); showToast("Quebra de cena inserida"); }} disabled={readMode || visualMode} className="flex items-center gap-1 font-mono text-[10px] px-2 py-1 rounded disabled:opacity-30" style={{ backgroundColor: colors.deskLight, color: colors.mutedLight }}>
-                          <Minus size={11} /> quebra
-                        </button>
-                        <div className="relative" ref={paragraphMenuRef}>
-                          <button onClick={() => setParagraphMenuOpen((o) => !o)} disabled={readMode || visualMode} className="flex items-center gap-1 font-mono text-[10px] px-2 py-1 rounded disabled:opacity-30" style={{ backgroundColor: paragraphMenuOpen ? colors.gold : colors.deskLight, color: paragraphMenuOpen ? colors.ink : colors.mutedLight }}>
-                            <Pilcrow size={11} /> parágrafo
-                          </button>
-                          {paragraphMenuOpen && (
-                            <div className="absolute left-0 top-full mt-1 z-20 w-44 rounded shadow-2xl p-1" style={{ backgroundColor: colors.panel }}>
-                              {PARAGRAPH_STYLES.map((ps) => (
-                                <button
-                                  key={ps.key}
-                                  onClick={() => {
-                                    const applied = applyParagraphStyle(contentTextareaRef.current, ps.key, (v) => updateScene(selectedScene, { content: v }));
-                                    setParagraphMenuOpen(false);
-                                    if (applied) {
-                                      showToast(`Parágrafo: ${ps.label}`);
-                                    } else if (ps.key === "h1") {
-                                      showToast("Já existe um Título grande nesta cena");
-                                    } else if (ps.key === "h2") {
-                                      showToast("Adicione um Título grande antes deste");
-                                    } else if (ps.key === "h3") {
-                                      showToast("Adicione um Título antes deste");
-                                    }
-                                  }}
-                                  className="w-full px-2 py-1.5 rounded font-mono text-xs text-left"
-                                  style={{ color: colors.mutedLight }}
-                                >
-                                  {ps.label}
-                                </button>
-                              ))}
-                            </div>
-                          )}
-                        </div>
-                      </div>
-
-                      <button onClick={() => { setReadMode((r) => !r); if (!readMode) { setVisualMode(false); setCmMode(false); } showToast(!readMode ? "Modo leitura — markdown convertido em visual" : "Modo escrita"); }} className="w-full flex items-center gap-2 px-2 py-1.5 mb-2 rounded font-mono text-xs text-left" style={{ backgroundColor: colors.deskLight, color: colors.mutedLight }}>
-                        {readMode ? <EyeOff size={12} /> : <Eye size={12} />} {readMode ? "voltar ao modo escrita" : "modo leitura"}
-                      </button>
-
-                      <button
-                        onClick={() => { setVisualMode((v) => !v); if (!visualMode) { setReadMode(false); setCmMode(false); } showToast(!visualMode ? "Editor visual — clique num parágrafo para ver a marcação" : "Editor de texto simples"); }}
-                        disabled={readMode}
-                        className="w-full flex items-center gap-2 px-2 py-1.5 mb-2 rounded font-mono text-xs text-left disabled:opacity-30"
-                        style={{ backgroundColor: visualMode ? colors.gold : colors.deskLight, color: visualMode ? colors.ink : colors.mutedLight }}
-                      >
-                        <Pilcrow size={12} /> {visualMode ? "desligar editor visual" : "editor visual (clique no parágrafo)"}
-                      </button>
-
-                      <button
-                        onClick={() => { setCmMode((v) => !v); if (!cmMode) { setReadMode(false); setVisualMode(false); } showToast(!cmMode ? "Editor CodeMirror ativado" : "Editor de texto simples"); }}
-                        disabled={readMode}
-                        className="w-full flex items-center gap-2 px-2 py-1.5 mb-2 rounded font-mono text-xs text-left disabled:opacity-30"
-                        style={{ backgroundColor: cmMode ? colors.gold : colors.deskLight, color: cmMode ? colors.ink : colors.mutedLight }}
-                      >
-                        <Sparkles size={12} /> {cmMode ? "desligar editor CodeMirror" : "editor CodeMirror"}
-                      </button>
-
-                      {cmMode && (
-                        <button
-                          onClick={() => { setStyleHints((v) => !v); showToast(!styleHints ? "Vícios de linguagem — advérbios em -mente e palavras repetidas" : "Vícios de linguagem desligado"); }}
-                          className="w-full flex items-center gap-2 px-2 py-1.5 mb-2 rounded font-mono text-xs text-left"
-                          style={{ backgroundColor: styleHints ? colors.gold : colors.deskLight, color: styleHints ? colors.ink : colors.mutedLight }}
-                        >
-                          <HelpCircle size={12} /> {styleHints ? "desligar vícios de linguagem" : "destacar vícios de linguagem"}
-                        </button>
-                      )}
-
-                      <div className="flex items-center gap-2 mb-2">
-                        <span className="font-mono text-[10px]" style={{ color: colors.muted }}>fonte</span>
-                        <button onClick={() => updateStore((p) => ({ ...p, appSettings: { ...p.appSettings, fontSize: Math.max(12, p.appSettings.fontSize - 1) } }))} className="px-2 py-1 rounded font-mono text-xs" style={{ backgroundColor: colors.deskLight, color: colors.mutedLight }}>A-</button>
-                        <span className="font-mono text-[10px]" style={{ color: colors.mutedLight }}>{fontSize}px</span>
-                        <button onClick={() => updateStore((p) => ({ ...p, appSettings: { ...p.appSettings, fontSize: Math.min(28, p.appSettings.fontSize + 1) } }))} className="px-2 py-1 rounded font-mono text-xs" style={{ backgroundColor: colors.deskLight, color: colors.mutedLight }}>A+</button>
-                      </div>
-                      <select
-                        className="w-full font-mono text-xs rounded px-2 py-1 outline-none mb-2"
-                        style={{ backgroundColor: colors.deskLight, color: colors.mutedLight }}
-                        value={store.appSettings.fontFamily || "lora"}
-                        onChange={(e) => updateStore((p) => ({ ...p, appSettings: { ...p.appSettings, fontFamily: e.target.value } }))}
-                      >
-                        {FONT_OPTIONS.map((f) => <option key={f.key} value={f.key}>{f.label}</option>)}
-                      </select>
-
-                      <button
-                        onClick={(e) => openTextContextMenu(e, (v) => updateScene(selectedScene, { content: v }), { onCreateNote: createNoteFromText, taOverride: contentTextareaRef.current })}
-                        disabled={readMode || visualMode}
-                        className="w-full flex items-center gap-2 px-2 py-1.5 mb-2 rounded font-mono text-xs text-left disabled:opacity-30"
-                        style={{ backgroundColor: colors.deskLight, color: colors.mutedLight }}
-                      >
-                        <Bold size={12} /> formatar seleção…
-                      </button>
-
-                      <button onClick={linkSelectionToGlossary} disabled={readMode || visualMode} className="w-full flex items-center gap-2 px-2 py-1.5 rounded font-mono text-xs text-left disabled:opacity-30" style={{ backgroundColor: colors.deskLight, color: colors.mutedLight }}>
-                        <Link2 size={12} /> vincular seleção ao glossário
-                      </button>
-                    </CollapsibleSection>
-
                     <CollapsibleSection title="anotações no texto" open={cenaSections.anotacoes} onToggle={() => toggleCenaSection("anotacoes")} colors={colors} count={(currentScene.annotations || []).length}>
                       {(currentScene.annotations || []).length === 0 ? (
                         <p className="font-mono text-[10px]" style={{ color: colors.muted }}>nenhuma ainda — digite <span className="font-bold">??</span> em qualquer ponto do texto pra criar uma</p>
                       ) : (
                         <div className="space-y-1.5">
                           {currentScene.annotations.map((a) => (
-                            <div key={a.id} onClick={() => setAnnotationEditor({ id: a.id })} className="flex items-center gap-2 px-2 py-1.5 rounded cursor-pointer" style={{ backgroundColor: colors.deskLight }}>
+                            <div key={a.id} onClick={() => { jumpToAnnotation(a.id); setAnnotationEditor({ id: a.id }); }} title="Abrir a nota e rolar até o pin no texto" className="flex items-center gap-2 px-2 py-1.5 rounded cursor-pointer" style={{ backgroundColor: colors.deskLight }}>
                               <span className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ backgroundColor: ANNOTATION_STATUS[a.status]?.color || ANNOTATION_STATUS.resolver.color }} />
                               <span className="font-body text-xs flex-1 truncate" style={{ color: colors.mutedLight }}>{a.text || "(nota vazia)"}</span>
                               <button onClick={(e) => { e.stopPropagation(); deleteAnnotation(a.id); }} style={{ color: colors.wine }}><Trash2 size={12} /></button>
@@ -2447,7 +2414,9 @@ function StoryEditor() {
                   ["Ctrl/Cmd + Shift + H", "destacar"],
                   ["Ctrl/Cmd + Shift + L", "cor do texto"],
                   ["Ctrl/Cmd + K", "vincular seleção ao glossário"],
-                  ["{{c: + começo do nome da cor", "autocompletar sugere a cor"],
+                  ["Alt + ↑ / ↓", "mover a linha atual pra cima/baixo"],
+                  ["Shift + Alt + ↑ / ↓", "duplicar a linha atual"],
+                  ["??", "criar uma nota (pin) neste ponto do texto"],
                 ].map(([syn, desc]) => (
                   <div key={syn} className="flex items-center gap-2 font-mono text-[10px]">
                     <span className="px-1.5 py-0.5 rounded flex-shrink-0" style={{ backgroundColor: colors.deskLight, color: colors.gold }}>{syn}</span>
@@ -2465,9 +2434,9 @@ function StoryEditor() {
             </div>
 
             <div>
-              <h4 className="font-mono text-[10px] uppercase tracking-wide mb-2" style={{ color: colors.gold }}>Ferramentas da cena</h4>
+              <h4 className="font-mono text-[10px] uppercase tracking-wide mb-2" style={{ color: colors.gold }}>Barra de ferramentas do texto</h4>
               <p className="font-body text-sm" style={{ color: colors.mutedLight }}>
-                Na aba "Cena", em "ferramentas de escrita": inserir diálogo, inserir quebra de cena, aplicar estilo de parágrafo, alternar modo leitura, ajustar fonte, e vincular a seleção ao glossário.
+                Fica logo acima do texto da cena: alternar entre Modo Mirror (escrita) e Modo Leitura, inserir diálogo, quebra de cena, estilo de parágrafo, formatar a seleção, vincular ao glossário e destacar vícios de linguagem. Fonte, tamanho da fonte e demais preferências ficam nas Configurações (ícone de engrenagem, no topo). O painel "Cena", à direita, guarda só os dados da cena: sinopse, status, personagens, fios, anotações e versões.
               </p>
             </div>
 
@@ -2479,27 +2448,6 @@ function StoryEditor() {
             </div>
           </div>
         </Modal>
-      )}
-
-      {/* Color autocomplete (estilo VS Code — aparece ao digitar "{{c:") */}
-      {colorAutocomplete && (
-        <div
-          className="fixed z-50 rounded shadow-2xl p-1 flex gap-1"
-          style={{ top: colorAutocomplete.y, left: colorAutocomplete.x, backgroundColor: colors.panel, border: `1px solid ${colors.deskLight}` }}
-        >
-          {colorAutocomplete.options.map((c) => (
-            <button
-              key={c.key}
-              onMouseDown={(e) => { e.preventDefault(); applyColorAutocomplete(c.key); }}
-              title={c.label}
-              className="flex items-center gap-1 px-2 py-1 rounded font-mono text-[10px]"
-              style={{ backgroundColor: colors.deskLight, color: colors.mutedLight }}
-            >
-              <span className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: c.value }} />
-              {c.key}
-            </button>
-          ))}
-        </div>
       )}
 
       {/* Anotação no texto (gatilho ??) */}
@@ -2529,6 +2477,13 @@ function StoryEditor() {
                 </button>
               ))}
             </div>
+            <button
+              onClick={() => { setAnnotationEditor(null); jumpToAnnotation(ann.id); }}
+              className="w-full flex items-center justify-center gap-1.5 py-1.5 mb-2 rounded font-mono text-xs"
+              style={{ backgroundColor: colors.deskLight, color: colors.mutedLight }}
+            >
+              <ChevronsRight size={12} /> ir até o pin no texto
+            </button>
             <button onClick={() => deleteAnnotation(ann.id)} className="w-full flex items-center justify-center gap-1.5 py-1.5 rounded font-mono text-xs" style={{ backgroundColor: colors.deskLight, color: colors.wine }}>
               <Trash2 size={12} /> excluir nota (remove também do texto)
             </button>
@@ -2889,6 +2844,27 @@ function makeTaAdapter(view) {
     get selectionEnd() { return view.state.selection.main.to; },
     focus() { view.focus(); },
     setSelectionRange(start, end) { view.dispatch({ selection: { anchor: start, head: end } }); },
+    // Rola a tela até a posição exata do marcador "??id??" no texto. O
+    // rolamento interno do CodeMirror não basta aqui porque o editor cresce
+    // junto com o conteúdo (overflow visível) — quem rola é o contêiner da
+    // página, então rolamos ele manualmente até a linha do pin.
+    scrollToAnnotation(id) {
+      const doc = view.state.doc.toString();
+      const idx = doc.indexOf(`??${id}??`);
+      if (idx === -1) return false;
+      view.dispatch({ selection: { anchor: idx }, effects: EditorView.scrollIntoView(idx, { y: "center" }) });
+      view.focus();
+      requestAnimationFrame(() => {
+        const rect = view.coordsAtPos(Math.min(idx, view.state.doc.length));
+        const scroller = view.dom.closest(".overflow-y-auto");
+        if (!rect || !scroller) return;
+        const s = scroller.getBoundingClientRect();
+        if (rect.top < s.top + 48 || rect.bottom > s.bottom - 48) {
+          scroller.scrollTo({ top: scroller.scrollTop + (rect.top - s.top) - s.height / 3, behavior: "smooth" });
+        }
+      });
+      return true;
+    },
   };
 }
 
@@ -3078,19 +3054,24 @@ function applyExternalContentChange(view, newContent) {
   while (start < maxStart && oldContent[start] === newContent[start]) start++;
   let oldEnd = oldContent.length, newEnd = newContent.length;
   while (oldEnd > start && newEnd > start && oldContent[oldEnd - 1] === newContent[newEnd - 1]) { oldEnd--; newEnd--; }
+  // Sem "selection" explícita: o CodeMirror reposiciona o cursor sozinho
+  // através da mudança, o que evita o cursor "pular" quando a deduplicação
+  // de pins ou uma ferramenta externa altera o texto.
   view.dispatch({
     changes: { from: start, to: oldEnd, insert: newContent.slice(start, newEnd) },
-    selection: { anchor: newEnd },
   });
 }
 
-function CodeMirrorSceneEditor({ content, onChange, colors, fontSize, fontFamily, onContextMenuEvt, styleHints, annotations, onAnnotationCreate, onAnnotationClick }) {
+function CodeMirrorSceneEditor({ content, onChange, colors, fontSize, fontFamily, onContextMenuEvt, onEditorKeyDown, styleHints, annotations, onAnnotationCreate, onAnnotationClick, apiRef }) {
   const containerRef = useRef(null);
   const viewRef = useRef(null);
+  const longPressRef = useRef(null);
   const onChangeRef = useRef(onChange);
   onChangeRef.current = onChange;
   const onContextMenuRef = useRef(onContextMenuEvt);
   onContextMenuRef.current = onContextMenuEvt;
+  const onKeyDownRef = useRef(onEditorKeyDown);
+  onKeyDownRef.current = onEditorKeyDown;
   const annotationsRef = useRef(annotations || []);
   annotationsRef.current = annotations || [];
   const onAnnotationCreateRef = useRef(onAnnotationCreate);
@@ -3101,7 +3082,9 @@ function CodeMirrorSceneEditor({ content, onChange, colors, fontSize, fontFamily
   useEffect(() => {
     if (!containerRef.current) return;
     const theme = EditorView.theme({
-      "&": { fontSize: `${fontSize}px`, backgroundColor: "transparent", height: "100%", minHeight: "50vh" },
+      // height auto (não 100%): o editor cresce dinamicamente conforme o
+      // texto aumenta — quem rola é o contêiner da página, como num papel.
+      "&": { fontSize: `${fontSize}px`, backgroundColor: "transparent", height: "auto", minHeight: "50vh" },
       ".cm-content": { fontFamily, color: colors.ink, padding: 0, caretColor: colors.ink, minHeight: "50vh" },
       ".cm-line": { padding: 0, lineHeight: 1.7 },
       "&.cm-focused": { outline: "none" },
@@ -3116,6 +3099,31 @@ function CodeMirrorSceneEditor({ content, onChange, colors, fontSize, fontFamily
         onContextMenuRef.current({ preventDefault: () => {}, clientX: event.clientX, clientY: event.clientY, target: ta });
         return true;
       },
+      // Atalhos de formatação (Ctrl+B, Ctrl+I, etc.) — repassados pro mesmo
+      // handler usado nas textareas, com o adaptador no lugar do alvo.
+      keydown: (event, view) => {
+        if (!onKeyDownRef.current || !(event.metaKey || event.ctrlKey)) return false;
+        onKeyDownRef.current({
+          key: event.key, metaKey: event.metaKey, ctrlKey: event.ctrlKey, shiftKey: event.shiftKey,
+          preventDefault: () => event.preventDefault(),
+          target: makeTaAdapter(view),
+        });
+        return event.defaultPrevented;
+      },
+      // Toque prolongado (~480ms) = botão direito em telas de toque — o
+      // navegador do iPhone/iPad não dispara "contextmenu" sozinho.
+      touchstart: (event, view) => {
+        const t = event.touches && event.touches[0];
+        if (!t || !onContextMenuRef.current) return false;
+        clearTimeout(longPressRef.current);
+        const x = t.clientX, y = t.clientY;
+        longPressRef.current = setTimeout(() => {
+          onContextMenuRef.current({ preventDefault: () => {}, clientX: x, clientY: y, target: makeTaAdapter(view) });
+        }, 480);
+        return false;
+      },
+      touchend: () => { clearTimeout(longPressRef.current); return false; },
+      touchmove: () => { clearTimeout(longPressRef.current); return false; },
     });
     const annotationDecorations = createAnnotationDecorationPlugin(annotationsRef, onAnnotationClickRef);
     const annotationInputHandler = createAnnotationInputHandler(onAnnotationCreateRef);
@@ -3135,7 +3143,16 @@ function CodeMirrorSceneEditor({ content, onChange, colors, fontSize, fontFamily
     });
     const view = new EditorView({ state, parent: containerRef.current });
     viewRef.current = view;
-    return () => { view.destroy(); viewRef.current = null; };
+    // Expõe a "interface de textarea" pro resto do app — é isso que faz a
+    // barra de ferramentas, os atalhos e o vínculo com o glossário
+    // funcionarem também no Modo Mirror.
+    if (apiRef) apiRef.current = makeTaAdapter(view);
+    return () => {
+      clearTimeout(longPressRef.current);
+      view.destroy();
+      viewRef.current = null;
+      if (apiRef) apiRef.current = null;
+    };
     // Recria o editor só quando a aparência muda (fonte/tema) — o texto em
     // si é sincronizado à parte, no efeito abaixo, sem recriar o editor a
     // cada letra digitada.
@@ -3157,79 +3174,6 @@ function CodeMirrorSceneEditor({ content, onChange, colors, fontSize, fontFamily
   }, [annotations]);
 
   return <div ref={containerRef} className="w-full break-words" style={{ minHeight: "50vh" }} />;
-}
-
-function VisualMarkdownEditor({ content, onChange, glossary, onTermClick, colors, fontSize, fontFamily }) {
-  const [editingIndex, setEditingIndex] = useState(null);
-  const [draft, setDraft] = useState("");
-  const taRef = useRef(null);
-  const lines = (content || "").split("\n");
-
-  useEffect(() => {
-    if (editingIndex === null || !taRef.current) return;
-    const ta = taRef.current;
-    ta.focus();
-    const len = ta.value.length;
-    ta.setSelectionRange(len, len);
-    ta.style.height = "auto";
-    ta.style.height = `${ta.scrollHeight}px`;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [editingIndex]);
-
-  const startEditing = (i) => {
-    setDraft(lines[i]);
-    setEditingIndex(i);
-  };
-
-  const commit = (nextEditingIndex) => {
-    if (editingIndex === null) return;
-    const newLines = [...lines.slice(0, editingIndex), ...draft.split("\n"), ...lines.slice(editingIndex + 1)];
-    onChange(newLines.join("\n"));
-    if (typeof nextEditingIndex === "number") {
-      setEditingIndex(nextEditingIndex);
-      setDraft("");
-    } else {
-      setEditingIndex(null);
-    }
-  };
-
-  return (
-    <div>
-      {lines.map((line, i) =>
-        editingIndex === i ? (
-          <textarea
-            key={i}
-            ref={taRef}
-            className="w-full bg-transparent outline-none resize-none"
-            style={{ color: colors.ink, fontFamily, fontSize: `${fontSize}px`, lineHeight: 1.7, border: `1px dashed ${colors.paperEdge}`, borderRadius: "4px", padding: "2px 6px", marginBottom: "0.4rem" }}
-            value={draft}
-            onChange={(e) => {
-              setDraft(e.target.value);
-              e.target.style.height = "auto";
-              e.target.style.height = `${e.target.scrollHeight}px`;
-            }}
-            onBlur={() => commit()}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && !e.shiftKey) {
-                e.preventDefault();
-                commit(editingIndex + 1);
-              } else if (e.key === "Escape") {
-                e.currentTarget.blur();
-              }
-            }}
-          />
-        ) : (
-          <div key={i} onClick={() => startEditing(i)} style={{ cursor: "text", fontFamily, fontSize: `${fontSize}px`, color: colors.ink, lineHeight: 1.7 }}>
-            {line === "" && lines.length === 1 ? (
-              <p className="mb-3" style={{ color: colors.muted, textIndent: "1.5em" }}>Era uma vez…</p>
-            ) : (
-              renderMarkdownLine(line, i, glossary, onTermClick)
-            )}
-          </div>
-        )
-      )}
-    </div>
-  );
 }
 
 function TagRow({ tags, colors, onAdd, onRemove }) {
