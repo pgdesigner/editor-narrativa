@@ -1707,6 +1707,7 @@ function StoryEditor() {
                   colors={colors}
                   fontSize={fontSize}
                   fontFamily={fontFamilyValue}
+                  onContextMenuEvt={(e) => openTextContextMenu(e, (v) => updateScene(selectedScene, { content: v }), { onCreateNote: createNoteFromText })}
                 />
               ) : visualMode ? (
                 <div className="w-full break-words" style={{ minHeight: "50vh" }} onClick={(e) => e.stopPropagation()}>
@@ -2674,6 +2675,61 @@ function computeMarkdownDecorations(view) {
   return builder.finish();
 }
 
+// Calcula só os intervalos dos SÍMBOLOS (sem o conteúdo formatado), pra
+// tratá-los como bloco atômico: as setas do teclado pulam por cima inteiros,
+// e apagar (backspace/delete) na borda remove o símbolo inteiro de uma vez,
+// não caractere por caractere.
+function computeMarkerRanges(view) {
+  const builder = new RangeSetBuilder();
+  for (const { from, to } of view.visibleRanges) {
+    let pos = from;
+    while (pos <= to) {
+      const line = view.state.doc.lineAt(pos);
+      const text = line.text;
+      let contentStart = 0;
+
+      const prefixMatch = text.match(/^(#{1,3}|>) /);
+      if (prefixMatch) {
+        builder.add(line.from, line.from + prefixMatch[0].length, { point: true });
+        contentStart = prefixMatch[0].length;
+      }
+
+      MD_INLINE_REGEX.lastIndex = contentStart;
+      let m;
+      while ((m = MD_INLINE_REGEX.exec(text)) !== null) {
+        const mStart = line.from + m.index;
+        const mEnd = mStart + m[0].length;
+        if (m[6] !== undefined) {
+          const openLen = `{{c:${m[6]}}}`.length, closeLen = 6;
+          builder.add(mStart, mStart + openLen, { point: true });
+          builder.add(mEnd - closeLen, mEnd, { point: true });
+          continue;
+        }
+        const markerLen = m[1] !== undefined ? 3 : m[2] !== undefined ? 2 : m[3] !== undefined ? 1 : 2;
+        builder.add(mStart, mStart + markerLen, { point: true });
+        builder.add(mEnd - markerLen, mEnd, { point: true });
+      }
+
+      pos = line.to + 1;
+    }
+  }
+  return builder.finish();
+}
+
+// Adaptador: expõe uma instância do CodeMirror com a mesma "interface" que
+// as funções de formatação já usam pra textarea (value/selectionStart/
+// selectionEnd/focus/setSelectionRange) — assim reaproveitamos o menu de
+// formatação já existente sem duplicar essa lógica.
+function makeTaAdapter(view) {
+  return {
+    get value() { return view.state.doc.toString(); },
+    get selectionStart() { return view.state.selection.main.from; },
+    get selectionEnd() { return view.state.selection.main.to; },
+    focus() { view.focus(); },
+    setSelectionRange(start, end) { view.dispatch({ selection: { anchor: start, head: end } }); },
+  };
+}
+
 const markdownDecorationPlugin = ViewPlugin.fromClass(
   class {
     constructor(view) {
@@ -2718,13 +2774,33 @@ const cmBaseExtensions = [
   keymap.of([...defaultKeymap, ...historyKeymap]),
   markdownDecorationPlugin,
   markdownSyntaxTheme,
+  EditorView.atomicRanges.of(computeMarkerRanges),
 ];
 
-function CodeMirrorSceneEditor({ content, onChange, colors, fontSize, fontFamily }) {
+// Diff simples (prefixo/sufixo comuns) entre o texto atual e o novo — evita
+// substituir o documento inteiro (o que jogaria o cursor pro início) quando
+// uma ferramenta externa (ex: o menu de formatação) muda o texto.
+function applyExternalContentChange(view, newContent) {
+  const oldContent = view.state.doc.toString();
+  if (oldContent === newContent) return;
+  const maxStart = Math.min(oldContent.length, newContent.length);
+  let start = 0;
+  while (start < maxStart && oldContent[start] === newContent[start]) start++;
+  let oldEnd = oldContent.length, newEnd = newContent.length;
+  while (oldEnd > start && newEnd > start && oldContent[oldEnd - 1] === newContent[newEnd - 1]) { oldEnd--; newEnd--; }
+  view.dispatch({
+    changes: { from: start, to: oldEnd, insert: newContent.slice(start, newEnd) },
+    selection: { anchor: newEnd },
+  });
+}
+
+function CodeMirrorSceneEditor({ content, onChange, colors, fontSize, fontFamily, onContextMenuEvt }) {
   const containerRef = useRef(null);
   const viewRef = useRef(null);
   const onChangeRef = useRef(onChange);
   onChangeRef.current = onChange;
+  const onContextMenuRef = useRef(onContextMenuEvt);
+  onContextMenuRef.current = onContextMenuEvt;
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -2736,11 +2812,21 @@ function CodeMirrorSceneEditor({ content, onChange, colors, fontSize, fontFamily
       ".cm-scroller": { fontFamily, overflow: "visible" },
       ".cm-gutters": { display: "none" },
     });
+    const contextMenuHandler = EditorView.domEventHandlers({
+      contextmenu: (event, view) => {
+        if (!onContextMenuRef.current) return false;
+        event.preventDefault();
+        const ta = makeTaAdapter(view);
+        onContextMenuRef.current({ preventDefault: () => {}, clientX: event.clientX, clientY: event.clientY, target: ta });
+        return true;
+      },
+    });
     const state = EditorState.create({
       doc: content,
       extensions: [
         ...cmBaseExtensions,
         theme,
+        contextMenuHandler,
         EditorView.updateListener.of((update) => {
           if (update.docChanged) onChangeRef.current(update.state.doc.toString());
         }),
@@ -2758,10 +2844,7 @@ function CodeMirrorSceneEditor({ content, onChange, colors, fontSize, fontFamily
   useEffect(() => {
     const view = viewRef.current;
     if (!view) return;
-    const current = view.state.doc.toString();
-    if (current !== content) {
-      view.dispatch({ changes: { from: 0, to: current.length, insert: content || "" } });
-    }
+    applyExternalContentChange(view, content || "");
   }, [content]);
 
   return <div ref={containerRef} className="w-full break-words" style={{ minHeight: "50vh" }} />;
