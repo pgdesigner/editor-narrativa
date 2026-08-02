@@ -2632,8 +2632,8 @@ function CodeMirrorSceneEditor({ content, onChange, colors, fontSize, fontFamily
   useEffect(() => {
     if (!containerRef.current) return;
     const theme = EditorView.theme({
-      "&": { fontSize: `${fontSize}px`, backgroundColor: "transparent" },
-      ".cm-content": { fontFamily, color: colors.ink, padding: 0, caretColor: colors.ink },
+      "&": { fontSize: `${fontSize}px`, backgroundColor: "transparent", height: "100%", minHeight: "50vh" },
+      ".cm-content": { fontFamily, color: colors.ink, padding: 0, caretColor: colors.ink, minHeight: "50vh" },
       ".cm-line": { padding: 0, lineHeight: 1.7 },
       "&.cm-focused": { outline: "none" },
       ".cm-scroller": { fontFamily, overflow: "visible" },
