@@ -2689,7 +2689,14 @@ const markdownDecorationPlugin = ViewPlugin.fromClass(
 );
 
 const markdownSyntaxTheme = EditorView.theme({
-  ".cm-md-marker": { opacity: "0.45" },
+  ".cm-md-marker": {
+    fontFamily: "'JetBrains Mono', monospace",
+    fontSize: "0.82em",
+    backgroundColor: "rgba(122,94,58,.18)",
+    borderRadius: "4px",
+    padding: "1px 4px",
+    opacity: "0.8",
+  },
   ".cm-md-bold": { fontWeight: "700" },
   ".cm-md-ital": { fontStyle: "italic" },
   ".cm-md-boldital": { fontWeight: "700", fontStyle: "italic" },
