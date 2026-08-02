@@ -284,19 +284,32 @@ function insertSceneBreak(ta, onChange) {
 }
 
 function ContextMenu({ x, y, items, onClose, colors }) {
+  const menuRef = useRef(null);
   useEffect(() => {
-    const handler = () => onClose();
-    window.addEventListener("click", handler);
-    window.addEventListener("scroll", handler, true);
+    const away = (e) => {
+      // Interações dentro do próprio menu não fecham (o item executa a ação
+      // e fecha por conta própria).
+      if (menuRef.current && menuRef.current.contains(e.target)) return;
+      onClose();
+    };
+    // Registrado só no próximo tick, e escutando "pointerdown" (não "click"):
+    // assim o MESMO clique que abriu o menu (ex: botão "formatar" da barra de
+    // ferramentas) — ou o clique fantasma disparado após o toque prolongado
+    // no celular — não fecha o menu no mesmo instante em que ele abre.
+    const t = setTimeout(() => {
+      window.addEventListener("pointerdown", away);
+      window.addEventListener("scroll", away, true);
+    }, 0);
     return () => {
-      window.removeEventListener("click", handler);
-      window.removeEventListener("scroll", handler, true);
+      clearTimeout(t);
+      window.removeEventListener("pointerdown", away);
+      window.removeEventListener("scroll", away, true);
     };
   }, [onClose]);
   const left = typeof window !== "undefined" ? Math.min(x, window.innerWidth - 210) : x;
   const top = typeof window !== "undefined" ? Math.min(y, window.innerHeight - items.length * 30 - 20) : y;
   return (
-    <div onClick={(e) => e.stopPropagation()} onContextMenu={(e) => e.preventDefault()} className="fixed z-50 rounded shadow-2xl py-1 w-52" style={{ top, left, backgroundColor: colors.panel, border: `1px solid ${colors.deskLight}` }}>
+    <div ref={menuRef} onClick={(e) => e.stopPropagation()} onContextMenu={(e) => e.preventDefault()} className="fixed z-50 rounded shadow-2xl py-1 w-52" style={{ top, left, backgroundColor: colors.panel, border: `1px solid ${colors.deskLight}` }}>
       {items.map((it, i) =>
         it.divider ? (
           <div key={i} className="my-1 border-t" style={{ borderColor: colors.deskLight }} />
@@ -1677,7 +1690,7 @@ function StoryEditor() {
         )}
 
         {/* Center: manuscript page */}
-        <div className={`${isMobileLayout ? (mobilePanel === "escrita" ? "flex" : "hidden") : "flex"} flex-1 min-w-0 overflow-y-auto justify-center ${isMobileLayout ? "py-4 px-2" : "py-8 px-4"}`}>
+        <div className={`${isMobileLayout ? (mobilePanel === "escrita" ? "flex" : "hidden") : "flex"} flex-1 min-w-0 overflow-y-auto justify-center items-start ${isMobileLayout ? "py-4 px-2" : "py-8 px-4"}`}>
           {workspace === "diario" ? (
             currentEntry ? (
               <div className={`w-full max-w-2xl rounded-sm shadow-2xl ${isMobileLayout ? "p-5" : "p-10"} min-h-full`} style={{ backgroundColor: colors.paper, boxShadow: "0 20px 60px rgba(0,0,0,0.4)" }}>
@@ -3022,6 +3035,42 @@ const markdownAutoClose = EditorView.inputHandler.of((view, from, to, insertedTe
   return false;
 });
 
+// Apagar o símbolo de UM lado de um par (**, *, ***, ~~, ==, {{c:…}}/{{/c}})
+// remove também o símbolo do outro lado — sem isso, o marcador que sobra
+// perde a estrutura, "vira texto" e fica poluindo até ser apagado à mão.
+// Só age quando a exclusão corresponde exatamente a um símbolo de um par
+// completo (o mesmo bloco atômico que o backspace/delete já remove inteiro).
+const pairedMarkerDeletion = EditorState.transactionFilter.of((tr) => {
+  if (!tr.docChanged || !tr.isUserEvent("delete")) return tr;
+  let only = null, count = 0;
+  tr.changes.iterChanges((fromA, toA, fromB, toB, inserted) => { count++; only = { fromA, toA, insLen: inserted.length }; });
+  if (count !== 1 || !only || only.insLen !== 0) return tr;
+  const doc = tr.startState.doc;
+  const line = doc.lineAt(only.fromA);
+  if (only.toA > line.to) return tr; // exclusão atravessando linhas — não mexe
+  const relFrom = only.fromA - line.from, relTo = only.toA - line.from;
+  const re = new RegExp(MD_INLINE_REGEX.source, "g");
+  let m, partner = null;
+  while ((m = re.exec(line.text)) !== null) {
+    let openLen, closeLen;
+    if (m[6] !== undefined) { openLen = `{{c:${m[6]}}}`.length; closeLen = "{{/c}}".length; }
+    else { openLen = closeLen = m[1] !== undefined ? 3 : m[2] !== undefined ? 2 : m[3] !== undefined ? 1 : 2; }
+    const oS = m.index, oE = m.index + openLen;
+    const cS = m.index + m[0].length - closeLen, cE = m.index + m[0].length;
+    if (relFrom === oS && relTo === oE) { partner = { from: line.from + cS, to: line.from + cE }; break; }
+    if (relFrom === cS && relTo === cE) { partner = { from: line.from + oS, to: line.from + oE }; break; }
+  }
+  if (!partner) return tr;
+  // Cursor fica no ponto da exclusão, descontando o parceiro se ele vinha antes.
+  const cursorAfter = partner.from < only.fromA ? only.fromA - (partner.to - partner.from) : only.fromA;
+  return {
+    changes: [{ from: only.fromA, to: only.toA }, { from: partner.from, to: partner.to }],
+    selection: { anchor: cursorAfter },
+    scrollIntoView: true,
+    userEvent: "delete.pair",
+  };
+});
+
 // Editor baseado em CodeMirror 6 — o mesmo motor de edição por trás do
 // Obsidian e do VS Code. Integração própria e enxuta com o React (em vez de
 // um pacote "de conveniência" de terceiros), pra não depender de versões
@@ -3041,6 +3090,7 @@ const cmBaseExtensions = [
   markdownSyntaxTheme,
   EditorView.atomicRanges.of(computeMarkerRanges),
   markdownAutoClose,
+  pairedMarkerDeletion,
 ];
 
 // Diff simples (prefixo/sufixo comuns) entre o texto atual e o novo — evita
